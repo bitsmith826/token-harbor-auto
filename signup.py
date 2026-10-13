@@ -66,8 +66,12 @@ SIGNUP_URL = "https://tokenharbor.ai/signup"
 LOGIN_URL = "https://tokenharbor.ai/login"
 DASHBOARD_URL = "https://tokenharbor.ai/dashboard"
 
-FAST_WAIT_SEC = 10
-MAX_FAST_RETRY = 10
+# Jeda saat situs minta melambat ("doing that a bit fast").
+# Terbukti dari tes manual 13 Okt: menunggu ~35s lalu klik SEKALI -> berhasil.
+# Versi lama (10s, sampai 10 retry = 11x klik dalam 100s) justru menaikkan
+# hukuman server menjadi "Our team has been alerted" / form tidak muncul.
+FAST_WAIT_SEC = 35
+MAX_FAST_RETRY = 3
 
 FAST_PATTERNS = [
     "doing that a bit fast",
@@ -272,7 +276,12 @@ def _page_context_baru(browser, proxy=None):
     return ctx, page
 
 
-def _tunggu_field(page, maks_iter=90, diam=False):
+def _tunggu_field(page, maks_iter=30, diam=False):
+    """Tunggu field email/password muncul.
+
+    maks_iter=30 x 3s = 90 detik. Versi lama 90 x 3s = 4,5 menit per percobaan;
+    kalau form tidak muncul dalam 90 detik, biasanya memang tidak akan muncul.
+    """
     if not diam:
         log("Menunggu field email/password (Turnstile) ...")
     for _ in range(maks_iter):
@@ -809,7 +818,8 @@ def _jalankan_signup(page, email, password):
             log(f"'doing that a bit fast' -> tunggu {FAST_WAIT_SEC}s "
                 f"(retry {fast_retry}/{MAX_FAST_RETRY})", "WARN")
             _snapshot(page, f"fast{fast_retry}")
-            time.sleep(FAST_WAIT_SEC)
+            # jeda + sedikit acak, supaya polanya tidak teratur seperti bot
+            time.sleep(FAST_WAIT_SEC + random.uniform(3, 12))
             _tunggu_tombol_siap(page)
             _tunggu_field(page, maks_iter=40, diam=True)
             try:

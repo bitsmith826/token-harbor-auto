@@ -25,6 +25,7 @@ FILE:
 import os
 import sys
 import time
+import random
 
 import signup
 import router9
@@ -420,6 +421,13 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
         else:
             simpan_result(email, password)
         sukses += 1
+
+        # Jeda antar akun: server menandai pola "terlalu cepat" kalau akun
+        # dibuat berturut-turut tanpa jeda.
+        if i + 1 < jumlah:
+            jeda = random.uniform(15, 40)
+            signup.log(f"Jeda {jeda:.0f}s sebelum akun berikutnya ...")
+            time.sleep(jeda)
 
     signup.log(f"Selesai: {sukses}/{jumlah} akun sukses create API key",
                "OK" if sukses else "WARN")
