@@ -255,6 +255,7 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
                 proxy_idx += 1
             signup.log(f"Signup via: {label_ip} (coba {percobaan}/{MAX_RETRY})")
 
+            proxy_mati = False
             try:
                 with Camoufox(**launch) as browser:
                     page = browser.new_page()
@@ -263,13 +264,33 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
                     status_signup = signup._jalankan_signup(page, email, password)
                 # browser (proxy) tertutup di sini -> proxy berhenti dipakai
             except Exception as e:
-                # NS_ERROR_NET_TIMEOUT / browser crash / proxy mati ->
-                # jangan bunuh batch, anggap 1 akun gagal & lanjut.
-                signup.log(f"Signup error jaringan/browser: {e}", "ERROR")
+                pesan = str(e)
+                # NS_ERROR_PROXY_FORBIDDEN / PROXY_CONNECTION_REFUSED ->
+                # proxy-nya sendiri yang mati/ditolak, bukan situsnya.
+                # Percuma mengulang lewat proxy yang sama: langsung buang.
+                if any(k in pesan for k in ("PROXY_FORBIDDEN",
+                                            "PROXY_CONNECTION_REFUSED",
+                                            "PROXY_CONNECTION_FAILED",
+                                            "PROXY_RESOLUTION_FAILED")):
+                    proxy_mati = True
+                    signup.log(f"Proxy mati/ditolak -> lepas proxy, lanjut via "
+                               f"IP asli", "WARN")
+                else:
+                    signup.log(f"Signup error jaringan/browser: {e}", "ERROR")
                 status_signup = "network_error"
 
             if status_signup == "dashboard":
                 break
+
+            if proxy_mati and sisa_proxy:
+                # Buang proxy yang mati, jangan pakai lagi.
+                sisa_proxy = sisa_proxy[1:]
+                proxy_idx = 0
+                percobaan -= 1   # gagal proxy tidak memakan jatah percobaan
+                if not sisa_proxy:
+                    signup.log("Semua proxy gagal -> lanjut pakai IP asli",
+                               "WARN")
+                continue
 
             if status_signup == "network_hour":
                 # "Too many sign-ups ... try again in an hour"
@@ -689,7 +710,7 @@ def main_otomatis(mode, pakai_proxy, jumlah, ulang=False):
     while True:
         putaran += 1
         if ulang:
-            signup.log(f"{'=' * 20} PUTARAN {putaran} {'=' * 20}", "INFO")
+            tampilan.bagian(f"PUTARAN {putaran}")
         try:
             if nama_mode in ("signup", "full"):
                 mode_signup_full(nama_mode, pakai_proxy, jumlah_override=jumlah)
@@ -707,6 +728,7 @@ def main_otomatis(mode, pakai_proxy, jumlah, ulang=False):
         signup.log(f"Putaran {putaran} selesai -> mulai putaran "
                    f"{putaran + 1} (jalan terus, hentikan manual kalau mau "
                    "berhenti)", "OK")
+        time.sleep(10)   # jeda kecil supaya tidak menghantam server terus-menerus
 
 
 def _baca_argumen():
