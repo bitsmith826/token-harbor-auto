@@ -27,6 +27,8 @@ import time
 import random
 import string
 import datetime
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from faker import Faker
 
@@ -217,6 +219,48 @@ def _parse_proxy(s):
         return {"server": f"http://{bagian[0]}:{bagian[1]}",
                 "username": bagian[2], "password": bagian[3]}
     raise ValueError(f"format proxy gak dikenali: {s}")
+
+
+def cek_proxy(s, timeout=20):
+    """Tes cepat: apakah proxy masih hidup?
+
+    Dipakai SEBELUM membuka browser, supaya proxy mati tidak dipakai sama
+    sekali. Mengembalikan True kalau proxy bisa dilewati.
+
+    Catatan: Camoufox dengan geoip=True juga melakukan request lewat proxy,
+    dan itulah yang dulu gagal dengan "Failed to get IP address ...
+    Tunnel connection failed: 403 Forbidden".
+    """
+    try:
+        p = _parse_proxy(s)
+        server = p["server"]
+        if p.get("username"):
+            u = urllib.parse.urlparse(server)
+            netloc = f"{p['username']}:{p.get('password', '')}@{u.hostname}:{u.port}"
+            server = f"{u.scheme}://{netloc}"
+        handler = urllib.request.ProxyHandler({"http": server, "https": server})
+        opener = urllib.request.build_opener(handler)
+        req = urllib.request.Request("https://ipecho.net/plain",
+                                     headers={"User-Agent": "curl/8"})
+        with opener.open(req, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def saring_proxy(daftar, log=None):
+    """Buang proxy yang mati. Return daftar proxy yang masih hidup.
+
+    Dicek sekali di awal, jadi batch tidak membuang waktu mengulang proxy
+    yang sudah jelas mati.
+    """
+    hidup = []
+    for s in daftar:
+        if cek_proxy(s):
+            hidup.append(s)
+        elif log:
+            log("Proxy mati / tidak bisa dipakai -> dibuang", "WARN")
+    return hidup
 
 
 def _page_context_baru(browser, proxy=None):

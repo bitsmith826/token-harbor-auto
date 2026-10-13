@@ -218,6 +218,18 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
         signup.log("proxies.txt kosong -> signup pakai IP asli", "WARN")
         pakai_proxy = False
 
+    # Tes proxy SEKALI di awal. Proxy mati (kuota habis / 403) dibuang di sini,
+    # jadi batch tidak membuang waktu mengulang proxy yang sudah jelas mati.
+    if pakai_proxy and proxies:
+        signup.log(f"Menguji {len(proxies)} proxy ...")
+        hidup = signup.saring_proxy(proxies, log=signup.log)
+        if hidup:
+            signup.log(f"{len(hidup)} dari {len(proxies)} proxy hidup", "OK")
+            proxies = hidup
+        else:
+            signup.log("Semua proxy mati -> signup pakai IP asli", "WARN")
+            pakai_proxy = False
+
     headless = signup.HEADLESS_BROWSER
     MAX_RETRY = 5
     sukses = 0
@@ -265,16 +277,22 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
                 # browser (proxy) tertutup di sini -> proxy berhenti dipakai
             except Exception as e:
                 pesan = str(e)
-                # NS_ERROR_PROXY_FORBIDDEN / PROXY_CONNECTION_REFUSED ->
-                # proxy-nya sendiri yang mati/ditolak, bukan situsnya.
-                # Percuma mengulang lewat proxy yang sama: langsung buang.
-                if any(k in pesan for k in ("PROXY_FORBIDDEN",
-                                            "PROXY_CONNECTION_REFUSED",
-                                            "PROXY_CONNECTION_FAILED",
-                                            "PROXY_RESOLUTION_FAILED")):
+                # Proxy mati / ditolak. Pesan bisa datang dalam beberapa
+                # bentuk: dari Firefox (PROXY_FORBIDDEN) atau dari Camoufox
+                # saat geoip gagal ambil IP ("Failed to get IP address",
+                # "Tunnel connection failed: 403 Forbidden").
+                pola_proxy_mati = ("PROXY_FORBIDDEN",
+                                   "PROXY_CONNECTION_REFUSED",
+                                   "PROXY_CONNECTION_FAILED",
+                                   "PROXY_RESOLUTION_FAILED",
+                                   "Tunnel connection failed",
+                                   "Failed to get IP address",
+                                   "Unable to connect to proxy",
+                                   "ProxyError")
+                if any(k in pesan for k in pola_proxy_mati):
                     proxy_mati = True
-                    signup.log(f"Proxy mati/ditolak -> lepas proxy, lanjut via "
-                               f"IP asli", "WARN")
+                    signup.log("Proxy mati/ditolak -> lepas proxy, lanjut via "
+                               "IP asli", "WARN")
                 else:
                     signup.log(f"Signup error jaringan/browser: {e}", "ERROR")
                 status_signup = "network_error"
