@@ -885,7 +885,7 @@ def login_dashboard(page, email, password):
 
     for _ in range(40):
         if _di_dashboard(page):
-            log("Sudah di dashboard", "OK")
+            log("Login berhasil, dashboard terbuka", "OK")
             return "ok"
         try:
             txt = _text_of(page).lower()

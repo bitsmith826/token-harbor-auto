@@ -362,7 +362,7 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
                            "lanjut akun berikutnya (TIDAK disimpan)", "ERROR")
             continue
 
-        signup.log("Signup sukses -> lanjut IP asli", "OK")
+        signup.log("Signup sukses -> lanjut verifikasi email (IP asli)", "OK")
 
         # ---- FASE 2: ENABLE + VERIFY + CREATE KEY (IP asli) ----
         key = None
