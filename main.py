@@ -231,15 +231,25 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
         tampilan.rinci("Password", password)
 
         # ---- FASE 1: SIGNUP (browser terpisah, bisa pakai proxy) ----
-        # Retry network error: rate-limit 1 jam -> tunggu, 1 menit -> tunggu.
+        # Retry network error: rate-limit 1 jam -> tunggu SEKALI, 1 menit -> tunggu.
         status_signup = "gagal"
         proxy_idx = 0
-        for percobaan in range(1, MAX_RETRY + 1):
+        # salinan daftar proxy; dikosongkan kalau proxy sudah habis, supaya
+        # percobaan berikutnya benar-benar pakai IP asli (bukan proxy yang sama).
+        sisa_proxy = list(proxies) if (pakai_proxy and proxies) else []
+        sudah_tunggu_jam = False   # tunggu 1 jam cukup sekali per akun
+        MAX_COBA_PROXY = 3         # berapa kali proxy dicoba sebelum dilepas
+        coba_proxy = 0
+        percobaan = 0
+        # while (bukan for): tunggu 1 jam TIDAK boleh memakan jatah percobaan,
+        # supaya setelah menunggu masih ada kesempatan mencoba.
+        while percobaan < MAX_RETRY:
+            percobaan += 1
             launch = {"headless": headless, "humanize": True,
                       "os": signup.OS_FP, "locale": ["id-ID"], "geoip": True}
             label_ip = "IP asli"
-            if pakai_proxy and proxies:
-                proxy_str = proxies[proxy_idx % len(proxies)]
+            if sisa_proxy:
+                proxy_str = sisa_proxy[proxy_idx % len(sisa_proxy)]
                 launch["proxy"] = signup._parse_proxy(proxy_str)
                 label_ip = f"proxy {proxy_str}"
                 proxy_idx += 1
@@ -263,17 +273,35 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
 
             if status_signup == "network_hour":
                 # "Too many sign-ups ... try again in an hour"
-                # Proxy masih ada -> ganti proxy (IP baru), langsung coba lagi.
-                # Proxy habis / gak ada -> tunggu 1 jam lalu coba lagi (IP asli).
-                if pakai_proxy and proxies and proxy_idx < len(proxies) * 2:
-                    signup.log("Rate limit 1 jam -> ganti proxy (IP baru)",
+                # Proxy residential: IP berputar tiap koneksi. Tapi kalau jeda
+                # antar percobaan cuma 5s, IP baru ikut langsung terbakar
+                # (coba sebelumnya sudah menghabiskan 30s+ retry di IP lama).
+                # Karena itu: tunggu 60s dulu, baru coba lewat proxy lagi.
+                if sisa_proxy and coba_proxy < MAX_COBA_PROXY:
+                    coba_proxy += 1
+                    signup.log(f"Rate limit 1 jam -> tunggu 60s lalu coba lagi "
+                               f"lewat proxy, IP akan berganti "
+                               f"(percobaan proxy {coba_proxy}/{MAX_COBA_PROXY})",
                                "WARN")
+                    time.sleep(60)
+                    continue
+                if sisa_proxy:
+                    signup.log("Rate limit 1 jam -> proxy sudah cukup dicoba, "
+                               "lepas proxy (berikutnya pakai IP asli)", "WARN")
+                    sisa_proxy = []
                     time.sleep(5)
                     continue
-                signup.log("Rate limit 1 jam & proxy habis -> tunggu 1 jam "
-                           "lalu coba lagi (IP asli)", "WARN")
-                time.sleep(3600)
-                continue
+                if not sudah_tunggu_jam:
+                    sudah_tunggu_jam = True
+                    percobaan -= 1   # tunggu 1 jam tidak memakan jatah percobaan
+                    signup.log("Rate limit 1 jam -> tunggu 1 jam lalu coba lagi "
+                               "(IP asli)", "WARN")
+                    time.sleep(3600)
+                    continue
+                signup.log("Rate limit 1 jam masih berlaku -> akun ini dilewati "
+                           "(tidak menunggu berjam-jam)", "WARN")
+                status_signup = "rate_limit"
+                break
 
             if status_signup == "network_minute":
                 # "couldn't create your account ... try again in a minute"
@@ -287,8 +315,12 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
 
         if status_signup != "dashboard":
             # signup gagal total -> akun gak ada, JANGAN disimpan
-            signup.log(f"Signup gagal setelah {MAX_RETRY} percobaan -> "
-                       "lanjut akun berikutnya (TIDAK disimpan)", "ERROR")
+            if status_signup == "rate_limit":
+                signup.log("Akun ini dilewati karena rate limit masih berlaku "
+                           "-> lanjut akun berikutnya", "WARN")
+            else:
+                signup.log(f"Signup gagal setelah {MAX_RETRY} percobaan -> "
+                           "lanjut akun berikutnya (TIDAK disimpan)", "ERROR")
             continue
 
         signup.log("Signup sukses -> lanjut IP asli", "OK")
