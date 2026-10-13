@@ -234,8 +234,20 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
     headless = signup.HEADLESS_BROWSER
     MAX_RETRY = 5
     sukses = 0
+    # Kalau form tidak muncul berturut-turut sekian akun, IP kemungkinan
+    # ditandai -> berhenti sebentar daripada memutar tanpa hasil.
+    MAX_NOFORM_BERUNTUN = 2
+    noform_beruntun = 0
 
     for i in range(jumlah):
+        # Pengaman: noform berturut-turut = form tidak ditampilkan (IP ditandai).
+        # Daripada memutar 45 menit tanpa hasil, berhenti dan tunggu 1 jam.
+        if noform_beruntun >= MAX_NOFORM_BERUNTUN:
+            signup.log(f"Form tidak muncul {noform_beruntun} akun berturut-turut "
+                       f"-> IP kemungkinan ditandai. Tunggu 1 jam dulu.", "WARN")
+            time.sleep(3600)
+            noform_beruntun = 0
+
         tampilan.bagian(f"AKUN {i + 1}/{jumlah}")
 
         email = signup.gen_email()
@@ -358,11 +370,18 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
             if status_signup == "rate_limit":
                 signup.log("Akun ini dilewati karena rate limit masih berlaku "
                            "-> lanjut akun berikutnya", "WARN")
+            elif status_signup == "noform":
+                noform_beruntun += 1
+                signup.log(f"Form tidak muncul -> akun dilewati "
+                           f"(noform berturut-turut: {noform_beruntun}/"
+                           f"{MAX_NOFORM_BERUNTUN})", "WARN")
             else:
                 signup.log(f"Signup gagal setelah {MAX_RETRY} percobaan -> "
                            "lanjut akun berikutnya (TIDAK disimpan)", "ERROR")
             continue
 
+        # akun ini sukses -> reset penghitung noform
+        noform_beruntun = 0
         signup.log("Signup sukses -> lanjut verifikasi email (IP asli)", "OK")
 
         # ---- FASE 2: ENABLE + VERIFY + CREATE KEY (IP asli) ----
