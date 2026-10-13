@@ -1,0 +1,23 @@
+# Jangan kirim ke context build Docker: data rahasia + sampah.
+.env
+.env.*
+!.env.example
+proxies.txt
+keys.txt
+result.txt
+result.txt.bak
+session_9router.json
+session_9router.json.bak
+logs/
+__pycache__/
+*.pyc
+*.pyo
+*.zip
+*.tar.gz
+*.tgz
+.git/
+.gitignore
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

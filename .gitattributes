@@ -1,0 +1,18 @@
+# Jaga line ending: Linux/Docker wajib LF, file Windows wajib CRLF.
+* text=auto eol=lf
+
+# Script shell dan berkas Docker: WAJIB LF, kalau CRLF gagal jalan di Linux
+*.sh text eol=lf
+Dockerfile text eol=lf
+entrypoint.sh text eol=lf
+
+# File Windows
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Biner: jangan diubah
+*.png binary
+*.jpg binary
+*.zip binary
+*.tar.gz binary
+*.gz binary

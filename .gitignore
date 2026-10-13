@@ -1,0 +1,25 @@
+# kredensial & data (RAHASIA: jangan di-upload ke GitHub)
+.env
+proxies.txt
+keys.txt
+result.txt
+result.txt.bak
+session_9router.json
+session_9router.json.bak
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# browser cache & log
+.camoufox/
+logs/
+*.log
+
+# arsip backup lokal
+*.zip
+*.tar.gz
+*.tgz

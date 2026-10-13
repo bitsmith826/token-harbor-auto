@@ -1,0 +1,46 @@
+# Token Harbor Auto -- Docker Compose
+#
+# Pemakaian:
+#   docker compose build                  # sekali saja (download Camoufox ~500MB)
+#   docker compose run --rm th-auto       # jalan sekali, bisa ketik menu
+#   docker compose up -d                  # jalan di belakang (pakai command di bawah)
+#   docker compose logs -f                # lihat log
+#   docker compose down                   # hentikan
+#
+# Project ini TIDAK membuka port apa pun, jadi tidak akan bentrok
+# dengan container lain di VPS (postgres, nginx, dsb).
+
+services:
+  th-auto:
+    build: .
+    image: token-harbor-auto
+    container_name: token-harbor-auto
+
+    # 24/7 pakai container ini:
+    #  - crash / exit error  -> nyala lagi sendiri
+    #  - selesai normal (exit 0) -> nyala lagi (karena --loop tidak pernah
+    #    selesai normal, ini cadangan kalau loop berhenti karena error)
+    #  - VPS reboot -> ikut nyala sendiri saat Docker daemon start,
+    #    KECUALI kalau dihentikan manual dengan `docker compose down`.
+    #    (mau tetap nyala walau sudah di-`down`? pakai: always)
+    restart: unless-stopped
+
+    # supaya bisa jawab menu kalau dijalankan tanpa --auto
+    stdin_open: true
+    tty: true
+
+    # reaping proses (Xvfb, firefox) supaya tidak menumpuk zombie
+    init: true
+
+    # Semua data ada di folder ini dan di-mount ke container, jadi:
+    #  - .env, proxies.txt  -> bisa diedit dari host
+    #  - keys.txt, result.txt, session_9router.json -> tidak hilang
+    #    walau container dihapus / dibuat ulang
+    volumes:
+      - .:/app
+
+    # Argumen untuk main.py: 24/7 TANPA HENTI.
+    # --auto 1 5 --loop = mode 1 (signup), 5 akun per putaran, ulang terus.
+    # Ganti angkanya sesuai kebutuhan, misal 10 akun per putaran.
+    # Mode lain: ["--auto", "2", "5", "--loop"] dst.
+    command: ["--auto", "1", "5", "--loop"]
