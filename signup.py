@@ -231,35 +231,45 @@ def ambil_proxy_fresh_otomatis(target=15, simpan=True):
     def _check(p):
         p_url = f"http://{p}"
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": p_url, "https": p_url}))
+        t0 = time.time()
         try:
             req = urllib.request.Request("https://tokenharbor.ai/signup", headers={"User-Agent": "Mozilla/5.0"})
-            with opener.open(req, timeout=4) as resp:
+            with opener.open(req, timeout=3.5) as resp:
                 if resp.status == 200:
-                    return p
+                    lat_ms = int((time.time() - t0) * 1000)
+                    return (p, lat_ms)
         except Exception:
             pass
         return None
 
     working = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        futures = [executor.submit(_check, p) for p in cand_list[:500]]
+    # Uji batch kandidat secara paralel
+    batch_cand = cand_list[:750]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
+        futures = [executor.submit(_check, p) for p in batch_cand]
         for f in concurrent.futures.as_completed(futures):
             res = f.result()
             if res:
                 working.append(res)
-                if len(working) >= target:
+                if len(working) >= target * 2:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
-    if working and simpan:
-        header = "# Daftar proxy untuk signup Token Harbor (satu per baris)\n# Format: host:port\n# Otomatis failover jika kena limit atau mati\n\n"
+    # Urutkan berdasarkan latensi tercepat (ms terendah di awal)
+    working.sort(key=lambda x: x[1])
+    top_working = [p for p, lat in working[:target]]
+
+    if top_working and simpan:
+        header = "# Daftar proxy untuk signup Token Harbor (satu per baris)\n# Format: host:port\n# Otomatis diurutkan dari latensi tercepat\n\n"
         with open(HERE / "proxies.txt", "w", encoding="utf-8") as f:
-            f.write(header + "\n".join(working) + "\n")
-        log(f"Berhasil menyimpan {len(working)} proxy fresh ke proxies.txt!", "OK")
-    elif not working:
+            f.write(header + "\n".join(top_working) + "\n")
+        fastest_lat = working[0][1] if working else 0
+        slowest_lat = working[min(len(working) - 1, target - 1)][1] if working else 0
+        log(f"Berhasil menyimpan {len(top_working)} proxy fresh (latensi {fastest_lat}ms - {slowest_lat}ms) ke proxies.txt!", "OK")
+    elif not top_working:
         log("Tidak ada proxy fresh baru yang lolos uji respon", "WARN")
 
-    return working
+    return top_working
 
 
 def _baca_proxies():
@@ -764,7 +774,7 @@ def signup_once(headless):
         try:
             with Camoufox(**launch) as browser:
                 page = browser.new_page()
-                timeout_proxy = 35_000 if proxy_str else 60_000
+                timeout_proxy = 16_000 if proxy_str else 45_000
                 page.set_default_timeout(timeout_proxy)
                 page.set_default_navigation_timeout(timeout_proxy)
                 status = _jalankan_signup(page, email, password)
@@ -846,9 +856,9 @@ def _jalankan_signup(page, email, password):
         pass
 
     log("Membuka halaman signup ...")
-    page.goto(SIGNUP_URL, wait_until="domcontentloaded")
+    page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=16000)
 
-    if not _tunggu_field(page):
+    if not _tunggu_field(page, maks_iter=15):
         log("Field tidak muncul (Turnstile belum lewat?)", "ERROR")
         return "noform"
 
@@ -864,7 +874,7 @@ def _jalankan_signup(page, email, password):
 
     fast_retry = 0
     terdaftar = False
-    maks_tunggu = 15  # 15 * 3s = 45 detik (cukup untuk respon Token Harbor; jangan biarkan proxy macet tunggu 6 menit)
+    maks_tunggu = 9  # 9 * 3s = 27 detik (cukup untuk respon Token Harbor; jangan biarkan proxy macet tunggu 45s)
     for i in range(1, maks_tunggu + 1):
         try:
             txt = _text_of(page)
