@@ -774,7 +774,7 @@ def signup_once(headless):
         try:
             with Camoufox(**launch) as browser:
                 page = browser.new_page()
-                timeout_proxy = 16_000 if proxy_str else 45_000
+                timeout_proxy = 22_000 if proxy_str else 45_000
                 page.set_default_timeout(timeout_proxy)
                 page.set_default_navigation_timeout(timeout_proxy)
                 status = _jalankan_signup(page, email, password)
@@ -856,9 +856,9 @@ def _jalankan_signup(page, email, password):
         pass
 
     log("Membuka halaman signup ...")
-    page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=16000)
+    page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=22000)
 
-    if not _tunggu_field(page, maks_iter=15):
+    if not _tunggu_field(page, maks_iter=18):
         log("Field tidak muncul (Turnstile belum lewat?)", "ERROR")
         return "noform"
 
