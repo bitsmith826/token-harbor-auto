@@ -121,16 +121,16 @@ def _tanya_jumlah(label):
 def _tanya_worker():
     """Tanya berapa worker simultan untuk multi-threading paralel."""
     while True:
-        jawab = input(f"{BOLD}Berapa worker simultan?{RST} [default 2, maks 5]: ").strip()
+        jawab = input(f"{BOLD}Berapa worker simultan?{RST} [default 1, maks 5]: ").strip()
         if not jawab:
-            return 2
+            return 1
         try:
             n = int(jawab)
             if 1 <= n <= 5:
                 return n
         except ValueError:
             pass
-        print(f"{YEL}Masukkan angka antara 1 sampai 5 (default 2).{RST}")
+        print(f"{YEL}Masukkan angka antara 1 sampai 5 (default 1).{RST}")
 
 
 # ----------------------------------------------------------------------
@@ -746,16 +746,16 @@ def main():
 # MODE OTOMATIS (untuk Docker / VPS / cron -- tanpa prompt)
 # ----------------------------------------------------------------------
 
-def main_otomatis(mode, pakai_proxy, jumlah, ulang=False, worker=2):
+def main_otomatis(mode, pakai_proxy, jumlah, ulang=False, worker=1):
     """Jalur non-interaktif: mode diambil dari argumen command-line.
 
     Dipakai container Docker / VPS supaya bisa jalan 24/7 tanpa ada orang
     mengetik di layar.
 
     Contoh:
-        python main.py --auto 1 5            -> mode 1, 5 akun, 2 worker
+        python main.py --auto 1 5            -> mode 1, 5 akun, 1 worker
         python main.py --auto 1 0 --loop     -> mode 1, UNLIMITED akun, jalan terus
-        python main.py --auto 2 10 y --worker 3 -> mode 2, 10 akun, 3 worker simultan
+        python main.py --auto 2 10 y --worker 2 -> mode 2, 10 akun, 2 worker simultan
     """
     signup._muat_env()
     tampilan.aktifkan_warna()
@@ -816,7 +816,7 @@ def _baca_argumen():
     jumlah = 5
     pakai_proxy = True
     ulang = False
-    worker = 2
+    worker = 1
 
     sisa = list(argv[1:])
     if "--loop" in sisa:
