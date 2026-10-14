@@ -403,6 +403,7 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None, worker_override=No
 
     def _worker_loop(w_id):
         nonlocal total_sukses
+        tampilan.set_worker_id(w_id)
         while not stop_event.is_set():
             with lock_sukses:
                 if total_sukses >= jumlah:

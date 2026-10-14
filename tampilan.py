@@ -230,6 +230,17 @@ def rinci(label, nilai, highlight=False):
 
 
 _print_lock = threading.Lock()
+_context = threading.local()
+
+
+def set_worker_id(wid):
+    """Set ID worker untuk thread saat ini (Thread-Local)."""
+    _context.worker_id = wid
+
+
+def get_worker_id():
+    """Ambil ID worker dari thread saat ini."""
+    return getattr(_context, "worker_id", None)
 
 
 def log(pesan, badge="INFO", worker_id=None):
@@ -240,7 +251,8 @@ def log(pesan, badge="INFO", worker_id=None):
         warna, ikon, nama = _BADGE_STYLE.get(b_key, (WHT, "•", f"{b_key[:5]:<5}"))
 
         jam = datetime.datetime.now().strftime("%H:%M:%S")
-        w_tag = f"{MAG}{BOLD}[W-{worker_id}]{RST} " if worker_id is not None else ""
+        wid = worker_id if worker_id is not None else get_worker_id()
+        w_tag = f"{MAG}{BOLD}[W-{wid}]{RST} " if wid is not None else ""
         tag = f"{warna}{BOLD}[{ikon} {nama}]{RST}"
 
         msg_color = WHT
@@ -257,8 +269,18 @@ def log(pesan, badge="INFO", worker_id=None):
 
 
 def tunggu(detik, alasan="Menunggu"):
-    """Countdown interaktif di satu baris (tidak membuat console freeze atau spam)."""
-    tutup_box()
+    """Countdown timer yang thread-safe.
+
+    Jika multi-worker aktif, hindari animasi \\r agar tidak merusak output terminal thread lain.
+    """
+    wid = get_worker_id()
+    if wid is not None:
+        log(f"{alasan}... jeda {detik}s", "WAIT", worker_id=wid)
+        time.sleep(detik)
+        return
+
+    with _print_lock:
+        tutup_box()
     jam = datetime.datetime.now().strftime("%H:%M:%S")
     tag = f"{YEL}{BOLD}[⏱ WAIT ]{RST}"
 
