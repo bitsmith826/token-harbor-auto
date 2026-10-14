@@ -77,12 +77,23 @@ Isi `.env`:
 | `TELEGRAM_NOTIF` | Opsional. `true` (default) atau `false` untuk mematikan notifikasi |
 | `PROXY` | Opsional. Satu proxy tunggal, kalau tidak pakai `proxies.txt` |
 
+## Fitur Utama & Ketahanan Otomasi
+
+- **Smart Auto-Scraper Proxy**: Ketika `proxies.txt` kosong atau habis terpakai, bot secara otomatis mengunduh ribuan proxy publik dari **11 sumber GitHub & API aktif**, lalu mengujinya secara paralel (50 workers) langsung ke Token Harbor (timeout 4s). Hanya 20 proxy terbaik & fresh yang disimpan.
+- **Fail-Fast 45 Detik**: Batas tunggu respon submit dipangkas dari 6 menit menjadi **45 detik**, dilengkapi **heartbeat log berkala** setiap 9 detik agar status bot selalu terpantau transparan dan tidak pernah membeku (*freeze*).
+- **Circuit Breaker (Anti-Stuck)**: Jika 1 slot akun gagal berturut-turut pada belasan proxy (default: sesuai jumlah proxy di memori), bot secara cerdas melewati (*skip*) slot tersebut dan langsung membuka slot akun berikutnya agar tidak membuang waktu.
+- **Pacing Turnstile Manusiawi**: Ketikan form diberi jeda realistis (1.2s - 2.5s) untuk mencegah deteksi bot Cloudflare (*"doing that a bit fast"*).
+- **Anti-Hydration Wipe**: Memverifikasi nilai `input_value()` form secara berkala agar kredensial tidak terhapus saat JavaScript React/Next.js me-render ulang halaman.
+- **Pemisahan Ketergantungan (Decoupled Buffering)**: Pembuatan akun dan API key tetap berjalan non-stop meskipun layanan 9Router di VPS sedang offline (Cloudflare Tunnel down). Semua hasil di-buffer ke `result.txt` dan `keys.txt`.
+
 ## Perilaku saat kena limit
 
 - **Too many sign-ups (mode 1 & 2):** kalau masih ada proxy, pindah ke proxy berikutnya.
-  Kalau proxy habis atau tidak dipakai, tunggu 1 jam lalu coba lagi.
-- **Too many attempts saat login (mode 3):** tunggu 1 jam, lalu coba lagi di akun yang sama.
-- **Error jaringan:** akun itu dilewati, batch lanjut ke akun berikutnya.
+  Kalau proxy habis, bot otomatis mengambil 20 proxy fresh baru dari internet.
+- **Cloudflare sibuk ("couldn't create account"):** langsung rotasi instan ke proxy berikutnya.
+- **Proxy mati / timeout:** langsung beralih ke proxy berikutnya dalam 45 detik (disertai heartbeat log).
+- **Too many attempts saat login (mode 3):** tunggu 30 detik, lalu coba lagi di akun yang sama.
+- **Error jaringan / batas retry tercapai:** akun dilewati (tidak disimpan jika belum jadi), batch lanjut ke akun berikutnya.
 
 ## File
 
