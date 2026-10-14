@@ -229,26 +229,31 @@ def rinci(label, nilai, highlight=False):
     print(f"  {GRY}│{RST}  {CYN}• {lbl_clean:<12}{GRY}:{RST} {val_color}{nilai}{RST}", flush=True)
 
 
-def log(pesan, badge="INFO"):
-    """Mencetak baris log dengan timestamp dan badge berwarna."""
-    tutup_box()
-    b_key = str(badge).upper()
-    warna, ikon, nama = _BADGE_STYLE.get(b_key, (WHT, "•", f"{b_key[:5]:<5}"))
+_print_lock = threading.Lock()
 
-    jam = datetime.datetime.now().strftime("%H:%M:%S")
-    tag = f"{warna}{BOLD}[{ikon} {nama}]{RST}"
 
-    msg_color = WHT
-    if b_key in ("ERROR", "GAGAL"):
-        msg_color = RED
-    elif b_key in ("WARN", "LIMIT"):
-        msg_color = YEL
-    elif b_key in ("OK", "SUKSES"):
-        msg_color = GRN
-    elif b_key == "STEP":
-        msg_color = f"{CYN}{BOLD}"
+def log(pesan, badge="INFO", worker_id=None):
+    """Mencetak baris log dengan timestamp dan badge berwarna (Thread-Safe)."""
+    with _print_lock:
+        tutup_box()
+        b_key = str(badge).upper()
+        warna, ikon, nama = _BADGE_STYLE.get(b_key, (WHT, "•", f"{b_key[:5]:<5}"))
 
-    print(f"  {GRY}{jam}{RST} {tag} {msg_color}{pesan}{RST}", flush=True)
+        jam = datetime.datetime.now().strftime("%H:%M:%S")
+        w_tag = f"{MAG}{BOLD}[W-{worker_id}]{RST} " if worker_id is not None else ""
+        tag = f"{warna}{BOLD}[{ikon} {nama}]{RST}"
+
+        msg_color = WHT
+        if b_key in ("ERROR", "GAGAL"):
+            msg_color = RED
+        elif b_key in ("WARN", "LIMIT"):
+            msg_color = YEL
+        elif b_key in ("OK", "SUKSES"):
+            msg_color = GRN
+        elif b_key == "STEP":
+            msg_color = f"{CYN}{BOLD}"
+
+        print(f"  {GRY}{jam}{RST} {w_tag}{tag} {msg_color}{pesan}{RST}", flush=True)
 
 
 def tunggu(detik, alasan="Menunggu"):

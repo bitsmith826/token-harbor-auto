@@ -101,8 +101,8 @@ else:
     HEADLESS_BROWSER = HEADLESS
 
 
-def log(msg, badge="INFO"):
-    tampilan.log(msg, badge)
+def log(msg, badge="INFO", worker_id=None):
+    tampilan.log(msg, badge, worker_id=worker_id)
 
 
 def _email_terpakai():

@@ -22,15 +22,18 @@ FILE:
   - keys.txt    : email|key           (input mode 4)
 """
 
+import concurrent.futures
 import os
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
 
-import signup
-import router9
-import tampilan
 import notif
+import router9
+import signup
+import tampilan
 
 HERE = Path(__file__).resolve().parent
 RESULT_TXT = HERE / "result.txt"
@@ -115,63 +118,76 @@ def _tanya_jumlah(label):
         print(f"{YEL}Masukkan angka lebih dari 0, atau ketik 0 untuk unlimited.{RST}")
 
 
+def _tanya_worker():
+    """Tanya berapa worker simultan untuk multi-threading paralel."""
+    while True:
+        jawab = input(f"{BOLD}Berapa worker simultan?{RST} [default 2, maks 5]: ").strip()
+        if not jawab:
+            return 2
+        try:
+            n = int(jawab)
+            if 1 <= n <= 5:
+                return n
+        except ValueError:
+            pass
+        print(f"{YEL}Masukkan angka antara 1 sampai 5 (default 2).{RST}")
+
+
 # ----------------------------------------------------------------------
-# SIMPAN HASIL
+# SIMPAN HASIL (THREAD-SAFE)
 # ----------------------------------------------------------------------
 
-def simpan_result(email, password, key=None):
-    """Tulis hasil ke result.txt (UPSERT: email sudah ada -> update, bukan append).
-
-    Format: email|password|key (key opsional).
-    Ditulis LANGSUNG per akun, gak nunggu semua selesai.
-    """
-    try:
-        baris = f"{email}|{password}"
-        if key:
-            baris += f"|{key}"
-
-        # baca semua baris, ganti baris email yg sama (upsert)
-        lama = []
-        if RESULT_TXT.exists():
-            with open(RESULT_TXT, encoding="utf-8") as f:
-                lama = [b.rstrip("\r\n") for b in f if b.strip()]
-
-        ada = False
-        for i, b in enumerate(lama):
-            if b.split("|")[0] == email:
-                # update: pakai key baru kalau ada, kalau gak ada keep key lama
-                if key or b.count("|") < 2:
-                    lama[i] = baris
-                ada = True
-                break
-        if not ada:
-            lama.append(baris)
-
-        with open(RESULT_TXT, "w", encoding="utf-8") as f:
-            f.write("\n".join(lama) + "\n")
-        signup.log(f"Disimpan ke result.txt: {email}", "OK")
-
-        # key ada -> tulis ke keys.txt juga (sekali per email)
-        if key:
-            _simpan_keys(email, key)
-    except Exception as e:
-        signup.log(f"Gagal simpan result.txt: {e}", "WARN")
+_file_lock = threading.Lock()
+_refill_lock = threading.Lock()
 
 
-def _simpan_keys(email, key):
-    """Tulis email|key ke keys.txt (upsert)."""
+def simpan_result(email, password, key=None, worker_id=None):
+    """Tulis hasil ke result.txt secara thread-safe (UPSERT)."""
+    with _file_lock:
+        try:
+            baris = f"{email}|{password}"
+            if key:
+                baris += f"|{key}"
+
+            lama = []
+            if RESULT_TXT.exists():
+                with open(RESULT_TXT, encoding="utf-8") as f:
+                    lama = [b.rstrip("\r\n") for b in f if b.strip()]
+
+            ada = False
+            for i, b in enumerate(lama):
+                if b.split("|")[0] == email:
+                    if key or b.count("|") < 2:
+                        lama[i] = baris
+                    ada = True
+                    break
+            if not ada:
+                lama.append(baris)
+
+            with open(RESULT_TXT, "w", encoding="utf-8") as f:
+                f.write("\n".join(lama) + "\n")
+            signup.log(f"Disimpan ke result.txt: {email}", "OK", worker_id=worker_id)
+
+            if key:
+                _simpan_keys(email, key, worker_id=worker_id)
+        except Exception as e:
+            signup.log(f"Gagal simpan result.txt: {e}", "WARN", worker_id=worker_id)
+
+
+def _simpan_keys(email, key, worker_id=None):
+    """Tulis email|key ke keys.txt secara thread-safe (upsert)."""
     try:
         lama = []
         if KEYS_TXT.exists():
             with open(KEYS_TXT, encoding="utf-8") as f:
                 lama = [b.rstrip("\r\n") for b in f if b.strip()]
         if any(b.split("|")[0] == email for b in lama):
-            return  # sudah ada
+            return
         with open(KEYS_TXT, "a", encoding="utf-8") as f:
             f.write(f"{email}|{key}\n")
-        signup.log(f"Disimpan ke keys.txt: {email}", "OK")
+        signup.log(f"Disimpan ke keys.txt: {email}", "OK", worker_id=worker_id)
     except Exception as e:
-        signup.log(f"Gagal simpan keys.txt: {e}", "WARN")
+        signup.log(f"Gagal simpan keys.txt: {e}", "WARN", worker_id=worker_id)
 
 
 def baca_empas():
@@ -212,26 +228,160 @@ def baca_keys():
 # MODE 1 & 2: signup (+ input 9Router untuk mode full)
 # ----------------------------------------------------------------------
 
-def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
-    """Mode 1 (signup) & 2 (full). Perbedaan: mode 2 lanjut input 9Router.
+def _isi_antrean_proxy(proxy_queue, target=15, worker_id=None):
+    """Thread-safe refill antrean proxy dari internet jika menipis."""
+    with _refill_lock:
+        if proxy_queue.qsize() >= 3:
+            return
+        signup.log("Antrean proxy menipis -> otomatis mengunduh & menguji proxy fresh baru...", "STEP", worker_id=worker_id)
+        fresh_proxies = signup.ambil_proxy_fresh_otomatis(target=target)
+        for p in fresh_proxies:
+            proxy_queue.put(p)
+        signup.log(f"Antrean proxy sekarang berisi {proxy_queue.qsize()} proxy aktif.", "OK", worker_id=worker_id)
 
-    jumlah_override: kalau diisi (mode --auto), jangan tanya lagi.
-    """
+
+def _proses_satu_akun_worker(worker_id, mode, pakai_proxy, proxy_queue, Camoufox, headless, max_percobaan=5):
+    """Jalankan proses lengkap 1 akun untuk worker tertentu."""
+    email = signup.gen_email()
+    password = signup.gen_password()
+    ip_info = tampilan.cek_ip_publik()
+    ip_asli = ip_info.get("ipv4") or "Tidak terdeteksi"
+
+    signup.log(f"Mulai registrasi akun: {email}", "STEP", worker_id=worker_id)
+
+    status_signup = "gagal"
+    current_proxy = None
+
+    for percobaan in range(1, max_percobaan + 1):
+        if percobaan > 1:
+            email = signup.gen_email()
+            password = signup.gen_password()
+            signup.log(f"Email & password baru: {email}", "INFO", worker_id=worker_id)
+
+        launch = {"headless": headless, "humanize": True,
+                  "os": signup.OS_FP, "locale": ["id-ID"], "geoip": True}
+        label_ip = f"IP Asli ({ip_asli})"
+
+        if pakai_proxy:
+            # Ambil proxy eksklusif dari antrean
+            try:
+                current_proxy = proxy_queue.get_nowait()
+            except queue.Empty:
+                current_proxy = None
+
+            if not current_proxy:
+                _isi_antrean_proxy(proxy_queue, target=15, worker_id=worker_id)
+                try:
+                    current_proxy = proxy_queue.get_nowait()
+                except queue.Empty:
+                    current_proxy = None
+
+            if current_proxy:
+                p_dict = signup._parse_proxy(current_proxy)
+                launch["proxy"] = p_dict
+                p_clean = p_dict.get("server", "").replace("http://", "").replace("https://", "")
+                label_ip = f"Proxy ({p_clean})"
+
+        signup.log(f"Signup via: {label_ip} (coba {percobaan}/{max_percobaan})", "STEP", worker_id=worker_id)
+
+        try:
+            with Camoufox(**launch) as browser:
+                page = browser.new_page()
+                timeout_signup = 22_000 if (pakai_proxy and current_proxy) else 45_000
+                page.set_default_timeout(timeout_signup)
+                page.set_default_navigation_timeout(timeout_signup)
+                status_signup = signup._jalankan_signup(page, email, password)
+        except Exception as e:
+            signup.log(f"Proxy/koneksi bermasalah: {e}", "WARN", worker_id=worker_id)
+            status_signup = "network_error"
+
+        if status_signup == "dashboard":
+            # Berhasil signup! Kembalikan proxy bagus ke antrean agar bisa dipakai lagi
+            if current_proxy and pakai_proxy:
+                proxy_queue.put(current_proxy)
+            break
+
+        if status_signup in ("network_hour", "network_minute", "network_error", "noform", "timeout", "fast"):
+            signup.log(f"Proxy bermasalah / limit ({status_signup}) -> buang proxy, ambil berikutnya...", "WARN", worker_id=worker_id)
+            time.sleep(1.5)
+            continue
+
+        signup.log(f"Signup gagal ({status_signup}) -> coba lagi", "WARN", worker_id=worker_id)
+
+    if status_signup != "dashboard":
+        signup.log(f"Signup gagal setelah {max_percobaan} percobaan", "ERROR", worker_id=worker_id)
+        return False, email, None
+
+    signup.log("Signup sukses -> lanjut verifikasi & API key (IP asli)", "OK", worker_id=worker_id)
+
+    # ---- FASE 2: ENABLE + VERIFY + CREATE KEY (IP asli) ----
+    key = None
+    try:
+        with Camoufox(headless=headless, humanize=True, os=signup.OS_FP,
+                      locale=["id-ID"], geoip=True) as browser:
+            page = browser.new_page()
+            page.set_default_timeout(90_000)
+            page.set_default_navigation_timeout(90_000)
+
+            ok = signup._proses_verifikasi(page, email, password)
+            if not ok:
+                signup.log(f"Verifikasi email gagal untuk {email} (akun tetap tersimpan)", "WARN", worker_id=worker_id)
+                simpan_result(email, password, worker_id=worker_id)
+                return False, email, None
+
+            key = signup.buat_api_key(page, email)
+            if not key:
+                signup.log(f"Create API key gagal untuk {email}", "ERROR", worker_id=worker_id)
+                simpan_result(email, password, worker_id=worker_id)
+                return False, email, None
+
+            if not signup.pastikan_verified(page, email, key, log=lambda m, b="INFO": signup.log(m, b, worker_id=worker_id)):
+                signup.log(f"Email {email} belum verified di API -> simpan tanpa input 9Router", "WARN", worker_id=worker_id)
+                simpan_result(email, password, worker_id=worker_id)
+                return False, email, None
+
+            if mode == "full":
+                if not signup._proses_router9(page, email, key):
+                    signup.log("Input 9Router gagal", "ERROR", worker_id=worker_id)
+                else:
+                    signup.log("Input 9Router sukses", "OK", worker_id=worker_id)
+                    notif.sukses_9router(email)
+    except Exception as e:
+        signup.log(f"Error fase 2: {e}", "ERROR", worker_id=worker_id)
+
+    if key:
+        simpan_result(email, password, key, worker_id=worker_id)
+        notif.sukses_key(email, "1" if mode != "full" else "2")
+        return True, email, key
+    else:
+        simpan_result(email, password, worker_id=worker_id)
+        return False, email, None
+
+
+def mode_signup_full(mode, pakai_proxy, jumlah_override=None, worker_override=None):
+    """Mode 1 (signup) & 2 (full). Mendukung Multi-Worker Concurrency paralel."""
     if jumlah_override and jumlah_override > 0:
         jumlah = int(jumlah_override)
     else:
         jumlah = _tanya_jumlah("Berapa akun?")
 
+    if worker_override and worker_override > 0:
+        worker_count = int(worker_override)
+    elif not jumlah_override:
+        worker_count = _tanya_worker()
+    else:
+        worker_count = 1
+
     proxies = signup._baca_proxies() if pakai_proxy else []
     if pakai_proxy:
         if not proxies:
             signup.log("proxies.txt kosong -> otomatis mencari proxy fresh dari internet...", "WARN")
-            proxies = signup.ambil_proxy_fresh_otomatis(target=20)
+            proxies = signup.ambil_proxy_fresh_otomatis(target=max(20, worker_count * 5))
         elif not jumlah_override:
             try:
                 tanya_fresh = input(f"{tampilan.CYN}Ambil proxy fresh baru otomatis dari internet? (y/n) [default n]: {tampilan.RST}").strip().lower()
                 if tanya_fresh == "y":
-                    proxies = signup.ambil_proxy_fresh_otomatis(target=20)
+                    proxies = signup.ambil_proxy_fresh_otomatis(target=max(20, worker_count * 5))
             except (EOFError, KeyboardInterrupt):
                 pass
         if not proxies:
@@ -240,195 +390,66 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
 
     headless = signup.HEADLESS_BROWSER
     Camoufox = _ambil_camoufox()
-    MAX_RETRY = 5
-    sukses = 0
-    global_proxy_idx = 0
-    max_percobaan = max(MAX_RETRY, len(proxies)) if (pakai_proxy and proxies) else MAX_RETRY
 
-    for i in range(jumlah):
-        label_total = "∞" if jumlah >= 999999 else str(jumlah)
-        tampilan.bagian(f"AKUN {i + 1}/{label_total}")
+    # Antrean proxy thread-safe
+    proxy_queue = queue.Queue()
+    if pakai_proxy and proxies:
+        for p in proxies:
+            proxy_queue.put(p)
 
-        email = signup.gen_email()
-        password = signup.gen_password()
-        ip_info = tampilan.cek_ip_publik()
-        ip_asli = ip_info.get("ipv4") or "Tidak terdeteksi"
-        warp_tag = " [WARP Shared]" if ip_info.get("is_warp") else ""
+    total_sukses = 0
+    lock_sukses = threading.Lock()
+    stop_event = threading.Event()
 
-        # Tentukan label jalur untuk kartu akun
-        if pakai_proxy and proxies:
-            p_awal = signup._parse_proxy(proxies[global_proxy_idx % len(proxies)])
-            p_host = p_awal.get("server", "").replace("http://", "").replace("https://", "")
-            jalur_info = f"Proxy ({p_host})"
-        else:
-            jalur_info = f"IP Asli ({ip_asli}{warp_tag})"
+    def _worker_loop(w_id):
+        nonlocal total_sukses
+        while not stop_event.is_set():
+            with lock_sukses:
+                if total_sukses >= jumlah:
+                    break
 
-        tampilan.rinci("Email", email)
-        tampilan.rinci("Password", password)
-        tampilan.rinci("Jalur / IP", jalur_info)
+            # Periksa antrean proxy jika menipis
+            if pakai_proxy and proxy_queue.qsize() < worker_count:
+                _isi_antrean_proxy(proxy_queue, target=max(15, worker_count * 4), worker_id=w_id)
 
-        # ---- FASE 1: SIGNUP (browser terpisah, bisa pakai proxy) ----
-        status_signup = "gagal"
-        for percobaan in range(1, max_percobaan + 1):
-            if percobaan > 1:
-                email = signup.gen_email()
-                password = signup.gen_password()
-                signup.log(f"Email & password baru: {email}", "INFO")
+            berhasil, em, k = _proses_satu_akun_worker(w_id, mode, pakai_proxy, proxy_queue, Camoufox, headless)
+            if berhasil:
+                with lock_sukses:
+                    total_sukses += 1
+                    label_total = "∞" if jumlah >= 999999 else str(jumlah)
+                    signup.log(f"Akun sukses [{total_sukses}/{label_total}]: {em}", "OK", worker_id=w_id)
+                    if total_sukses >= jumlah:
+                        stop_event.set()
+                        break
+            time.sleep(1)
 
-            launch = {"headless": headless, "humanize": True,
-                      "os": signup.OS_FP, "locale": ["id-ID"], "geoip": True}
-            label_ip = f"IP Asli ({ip_asli})"
-            if pakai_proxy:
-                if not proxies or global_proxy_idx >= len(proxies):
-                    signup.log("Proxy di daftar habis -> otomatis fetch proxy fresh baru dari internet...", "STEP")
-                    proxies = signup.ambil_proxy_fresh_otomatis(target=20)
-                    global_proxy_idx = 0
-                if proxies:
-                    proxy_str = proxies[global_proxy_idx]
-                    p_dict = signup._parse_proxy(proxy_str)
-                    launch["proxy"] = p_dict
-                    p_clean = p_dict.get("server", "").replace("http://", "").replace("https://", "")
-                    label_ip = f"Proxy ({p_clean}) [#{global_proxy_idx + 1}/{len(proxies)}]"
-            signup.log(f"Signup via: {label_ip} (coba {percobaan})", "STEP")
+    label_total = "∞" if jumlah >= 999999 else str(jumlah)
+    tampilan.bagian(f"MEMULAI {worker_count} WORKER PARALEL (Target: {label_total} Akun)")
+    tampilan.rinci("Mode", mode.upper())
+    tampilan.rinci("Worker Simultan", str(worker_count))
+    tampilan.rinci("Jalur", f"Proxy Queue ({proxy_queue.qsize()} proxy)" if pakai_proxy else "IP Asli")
 
+    if worker_count > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(_worker_loop, w_id) for w_id in range(1, worker_count + 1)]
             try:
-                with Camoufox(**launch) as browser:
-                    page = browser.new_page()
-                    timeout_signup = 35_000 if (pakai_proxy and proxies) else 60_000
-                    page.set_default_timeout(timeout_signup)
-                    page.set_default_navigation_timeout(timeout_signup)
-                    status_signup = signup._jalankan_signup(page, email, password)
-            except Exception as e:
-                # NS_ERROR_NET_TIMEOUT / browser crash / proxy mati
-                signup.log(f"Proxy/koneksi bermasalah: {e}", "WARN")
-                status_signup = "network_error"
-
-            if status_signup == "dashboard":
-                # Sukses: tetap gunakan proxy ini untuk akun berikutnya (jangan ganti sampai limit/mati)
-                break
-
-            if status_signup == "network_hour":
-                # "Too many sign-ups ... try again in an hour"
-                signup.log(f"Rate limit (too many sign-ups) terdeteksi pada {label_ip}", "LIMIT")
-                if pakai_proxy and proxies:
-                    global_proxy_idx += 1
-                    signup.log("Proxy limit (too many sign-ups) -> beralih ke proxy berikutnya...", "WARN")
-                    time.sleep(2)
-                    continue
-                signup.log("Pakai IP asli -> mulai jeda cooldown 1 jam...", "LIMIT")
-                tampilan.tunggu(3600, "Cooldown IP Rate-Limit")
-                continue
-
-            if status_signup == "network_error":
-                # Proxy mati / connection timeout / connection refused
-                if pakai_proxy and proxies:
-                    global_proxy_idx += 1
-                    signup.log(f"Proxy mati/terputus -> beralih ke proxy berikutnya...", "WARN")
-                    time.sleep(2)
-                    continue
-
-            if status_signup in ("noform", "timeout", "fast"):
-                # Turnstile Cloudflare memblokir atau menandai proxy ini
-                if pakai_proxy and proxies:
-                    global_proxy_idx += 1
-                    signup.log(f"Turnstile memblokir/menandai proxy ini ({status_signup}) -> langsung beralih ke proxy berikutnya...", "WARN")
-                    time.sleep(1.5)
-                    continue
-
-            if status_signup == "network_minute":
-                # "couldn't create your account ... try again in a minute"
-                if pakai_proxy and proxies:
-                    global_proxy_idx += 1
-                    signup.log("Cloudflare sibuk pada proxy ini -> langsung beralih ke proxy berikutnya...", "WARN")
-                    time.sleep(2)
-                    continue
-                signup.log("Server Cloudflare sibuk -> jeda cooldown 90 detik...", "LIMIT")
-                tampilan.tunggu(90, "Jeda keamanan server")
-                continue
-
-            if pakai_proxy and proxies:
-                global_proxy_idx += 1
-                signup.log(f"Signup gagal ({status_signup}) -> langsung beralih ke proxy berikutnya...", "WARN")
-                time.sleep(2)
-                continue
-
-            signup.log(f"Signup gagal ({status_signup})", "WARN")
-            continue
-
-        if status_signup != "dashboard":
-            # signup gagal total -> akun gak ada, JANGAN disimpan
-            signup.log(f"Signup gagal setelah {max_percobaan} percobaan -> "
-                       "lanjut akun berikutnya (TIDAK disimpan)", "ERROR")
-            continue
-
-        signup.log("Signup sukses -> lanjut IP asli", "OK")
-
-        # ---- FASE 2: ENABLE + VERIFY + CREATE KEY (IP asli) ----
-        key = None
-        router_ok = True
-        try:
-            with Camoufox(headless=headless, humanize=True, os=signup.OS_FP,
-                          locale=["id-ID"], geoip=True) as browser:
-                page = browser.new_page()
-                page.set_default_timeout(90_000)
-                page.set_default_navigation_timeout(90_000)
-
-                ok = signup._proses_verifikasi(page, email, password)
-                if not ok:
-                    signup.log("Verifikasi email gagal (akun tetap tersimpan)",
-                               "WARN")
-                    simpan_result(email, password)
-                    continue
-
-                key = signup.buat_api_key(page, email)
-                if not key:
-                    signup.log("Create API key gagal", "ERROR")
-                    simpan_result(email, password)
-                    continue
-
-                # safety net: pastikan email bener-bener verified di API.
-                # (verifikasi fase 1 bisa false-positive; cek langsung API).
-                if not signup.pastikan_verified(page, email, key,
-                                                log=signup.log):
-                    signup.log(f"Email {email} belum terverifikasi -> "
-                               "simpan tanpa input 9Router", "WARN")
-                    simpan_result(email, password)
-                    continue
-
-                # ---- MODE FULL: INPUT ke 9ROUTER (masih IP asli) ----
-                # WAJIB di dalam with Camoufox -- kalau di luar, browser sudah
-                # tertutup -> "Event loop is closed".
-                if mode == "full":
-                    if not signup._proses_router9(page, email, key):
-                        signup.log("Input 9Router gagal", "ERROR")
-                        router_ok = False
-                    else:
-                        signup.log("Input 9Router sukses", "OK")
-                        notif.sukses_9router(email)
-        except Exception as e:
-            # error di fase 2 jangan bunuh batch 100 akun.
-            signup.log(f"Error fase 2 (verify/key/9Router): {e}", "ERROR")
-            router_ok = False
-
-        # key SELALU disimpan walau 9Router gagal -- key-nya sudah dibuat di
-        # Token Harbor; kalau dibuang harus login & buat ulang. Key yg gagal
-        # masuk 9Router tinggal di-reimport pakai mode 4 (deteksi duplikat).
-        if key:
-            simpan_result(email, password, key)
-            notif.sukses_key(email, "1" if mode != "full" else "2")
-        else:
-            simpan_result(email, password)
-        sukses += 1
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
+            except KeyboardInterrupt:
+                signup.log("Dihentikan oleh pengguna (Ctrl+C). Menunggu worker selesai...", "WARN")
+                stop_event.set()
+    else:
+        _worker_loop(1)
 
     tampilan.ringkasan({
         "Mode": mode.upper(),
-        "Total Target": jumlah,
-        "Sukses Key": sukses,
-        "Gagal / Skip": jumlah - sukses,
-        "Status Akhir": "OK" if sukses == jumlah else ("SEBAGIAN" if sukses > 0 else "GAGAL")
-    }, "HASIL BATCH TOKEN HARBOR")
-    tampilan.log("Semua proses selesai. Hasil tersimpan di result.txt", "OK")
-    return 0 if sukses else 1
+        "Worker": worker_count,
+        "Total Target": jumlah if jumlah < 999999 else "UNLIMITED",
+        "Sukses Key": total_sukses,
+        "Status Akhir": "OK" if total_sukses > 0 else "GAGAL"
+    }, "HASIL MULTI-WORKER TOKEN HARBOR")
+    tampilan.log("Semua proses worker selesai. Hasil tersimpan di result.txt", "OK")
+    return 0 if total_sukses else 1
 
 
 # ----------------------------------------------------------------------
@@ -724,21 +745,16 @@ def main():
 # MODE OTOMATIS (untuk Docker / VPS / cron -- tanpa prompt)
 # ----------------------------------------------------------------------
 
-def main_otomatis(mode, pakai_proxy, jumlah, ulang=False):
+def main_otomatis(mode, pakai_proxy, jumlah, ulang=False, worker=2):
     """Jalur non-interaktif: mode diambil dari argumen command-line.
 
     Dipakai container Docker / VPS supaya bisa jalan 24/7 tanpa ada orang
-    mengetik di layar. .env TIDAK ditambah variabel baru.
+    mengetik di layar.
 
     Contoh:
-        python main.py --auto 1 5            -> mode 1, 5 akun, lalu berhenti
-        python main.py --auto 1 5 --loop     -> mode 1, 5 akun, ULANG TERUS
-        python main.py --auto 2 5            -> mode 2, pakai proxy, 5 akun
-        python main.py --auto 3              -> mode 3, tanpa proxy, 5 akun
-
-    ulang=True: tiap putaran selesai, langsung mulai putaran berikutnya
-    dengan akun baru, tanpa henti. Berhenti hanya kalau dihentikan manual
-    (docker compose down / Ctrl+C / kill).
+        python main.py --auto 1 5            -> mode 1, 5 akun, 2 worker
+        python main.py --auto 1 0 --loop     -> mode 1, UNLIMITED akun, jalan terus
+        python main.py --auto 2 10 y --worker 3 -> mode 2, 10 akun, 3 worker simultan
     """
     signup._muat_env()
     tampilan.aktifkan_warna()
@@ -749,7 +765,7 @@ def main_otomatis(mode, pakai_proxy, jumlah, ulang=False):
     if nama_mode in ("signup", "full"):
         if pakai_proxy and not signup._baca_proxies():
             signup.log("proxies.txt kosong -> otomatis fetch proxy fresh baru dari internet...", "STEP")
-            signup.ambil_proxy_fresh_otomatis(target=20)
+            signup.ambil_proxy_fresh_otomatis(target=max(20, worker * 5))
             if not signup._baca_proxies():
                 signup.log("Gagal fetch proxy -> signup pakai IP asli", "WARN")
                 pakai_proxy = False
@@ -757,7 +773,7 @@ def main_otomatis(mode, pakai_proxy, jumlah, ulang=False):
         pakai_proxy = False
 
     signup.log(f"Mode otomatis: {nama_mode} | proxy={pakai_proxy} | "
-               f"jumlah={jumlah} | ulang_terus={ulang}", "INFO")
+               f"jumlah={jumlah} | worker={worker} | ulang_terus={ulang}", "INFO")
 
     if not _cek_konfigurasi(nama_mode):
         return 1
@@ -769,7 +785,7 @@ def main_otomatis(mode, pakai_proxy, jumlah, ulang=False):
             signup.log(f"{'=' * 20} PUTARAN {putaran} {'=' * 20}", "INFO")
         try:
             if nama_mode in ("signup", "full"):
-                mode_signup_full(nama_mode, pakai_proxy, jumlah_override=jumlah)
+                mode_signup_full(nama_mode, pakai_proxy, jumlah_override=jumlah, worker_override=worker)
             elif nama_mode == "create_key":
                 mode_create_key()
             else:
@@ -787,9 +803,9 @@ def main_otomatis(mode, pakai_proxy, jumlah, ulang=False):
 
 
 def _baca_argumen():
-    """Baca argumen `--auto <mode> [jumlah] [y|n] [--loop]`.
+    """Baca argumen `--auto <mode> [jumlah] [y|n] [--loop] [--worker N]`.
 
-    Return (mode, pakai_proxy, jumlah, ulang) atau None kalau bukan --auto.
+    Return (mode, pakai_proxy, jumlah, ulang, worker) atau None kalau bukan --auto.
     """
     argv = sys.argv[1:]
     if not argv or argv[0] != "--auto":
@@ -799,6 +815,7 @@ def _baca_argumen():
     jumlah = 5
     pakai_proxy = True
     ulang = False
+    worker = 2
 
     sisa = list(argv[1:])
     if "--loop" in sisa:
@@ -807,6 +824,14 @@ def _baca_argumen():
     if "--terus" in sisa:
         ulang = True
         sisa.remove("--terus")
+    if "--worker" in sisa:
+        try:
+            w_idx = sisa.index("--worker")
+            sisa.pop(w_idx)
+            if w_idx < len(sisa):
+                worker = max(1, min(5, int(sisa.pop(w_idx))))
+        except Exception:
+            pass
 
     if sisa and sisa[0] in ("1", "2", "3", "4"):
         mode = sisa.pop(0)
@@ -818,7 +843,7 @@ def _baca_argumen():
     if sisa:
         pakai_proxy = sisa.pop(0).strip().lower() not in ("n", "no", "0", "false")
 
-    return mode, pakai_proxy, jumlah, ulang
+    return mode, pakai_proxy, jumlah, ulang, worker
 
 
 if __name__ == "__main__":
