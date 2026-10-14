@@ -852,12 +852,13 @@ def _jalankan_signup(page, email, password):
         log("Field tidak muncul (Turnstile belum lewat?)", "ERROR")
         return "noform"
 
-    # Input form dengan ketikan per huruf realistis agar Turnstile tidak mendeteksi bot
+    # Input form dengan ketikan per huruf realistis
     log("Mengisi form ...")
     _ketik_manusiawi(page, 'input[type="email"]', email)
-    time.sleep(0.4)
+    time.sleep(1.2)
     _ketik_manusiawi(page, 'input[type="password"]', password)
-    time.sleep(0.8)
+    # Beri jeda 3.5s agar Cloudflare Turnstile selesai memproses token di latar belakang
+    time.sleep(3.5)
     log("Klik Create account")
     _klik_create(page)
 
@@ -886,12 +887,24 @@ def _jalankan_signup(page, email, password):
             continue
 
         if notice == "fast":
-            # Jika terdeteksi 'doing that a bit fast', Cloudflare sudah menandai IP proxy ini.
-            # Menunggu 20s x 10x hanya membuang waktu dan berujung 'network_minute'.
-            # Langsung failover instan ke proxy fresh berikutnya!
-            log("Cloudflare Turnstile menandai IP ini ('doing that a bit fast') -> langsung beralih ke proxy berikutnya...", "WARN")
-            _snapshot(page, "fast_failover")
-            return "fast"
+            fast_retry += 1
+            if fast_retry > 2:
+                log("Batas retry 'fast' tercapai (2x) -> beralih ke proxy berikutnya...", "WARN")
+                _snapshot(page, "fast_limit")
+                return "fast"
+            log(f"'doing that a bit fast' -> jeda 18s (retry {fast_retry}/2)", "WARN")
+            _snapshot(page, f"fast{fast_retry}")
+            tampilan.tunggu(18, "Jeda keamanan Turnstile")
+            _tunggu_tombol_siap(page)
+            _tunggu_field(page, maks_iter=20, diam=True)
+            try:
+                page.locator('input[type="password"]').fill(password)
+                time.sleep(1.5)
+            except Exception:
+                _snapshot(page, f"fast{fast_retry}_nofield")
+                return "nofield"
+            _klik_create(page)
+            continue
 
         if notice in ("network_hour", "network_minute"):
             _snapshot(page, notice)
