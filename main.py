@@ -336,8 +336,20 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
                     continue
 
             if status_signup == "network_minute":
+                # "couldn't create your account ... try again in a minute"
+                if pakai_proxy and proxies:
+                    global_proxy_idx += 1
+                    signup.log("Cloudflare sibuk pada proxy ini -> langsung beralih ke proxy berikutnya...", "WARN")
+                    time.sleep(2)
+                    continue
                 signup.log("Server Cloudflare sibuk -> jeda cooldown 90 detik...", "LIMIT")
                 tampilan.tunggu(90, "Jeda keamanan server")
+                continue
+
+            if pakai_proxy and proxies:
+                global_proxy_idx += 1
+                signup.log(f"Signup gagal ({status_signup}) -> langsung beralih ke proxy berikutnya...", "WARN")
+                time.sleep(2)
                 continue
 
             signup.log(f"Signup gagal ({status_signup})", "WARN")
