@@ -16,3 +16,16 @@
 1. **Cloudflare Tunnel Detection**:
    - Sebelum melaporkan form tidak ditemukan pada layanan eksternal (seperti 9Router), selalu periksa kode HTTP dan body text apakah ada Cloudflare Error 530 / 1033 (Argo Tunnel Error), 502, atau 504.
    - Berikan notifikasi yang jelas jika server upstream di VPS sedang offline.
+
+## 3. Decoupled Downstream & Buffer Pattern
+1. **Pemisahan Ketergantungan Downstream**:
+   - Kegagalan atau status offline pada 9Router TIDAK BOLEH menghentikan proses pembuatan akun baru.
+   - Seluruh kredensial dan API key tetap wajib disimpan langsung ke `result.txt` dan `keys.txt` sebagai antrean buffer permanen.
+2. **Bulk Re-Import**:
+   - Ketika 9Router kembali pulih, seluruh antrean key di `keys.txt` dapat disinkronkan sekaligus via Mode 4 (`import_keys`) tanpa duplikasi.
+
+## 4. Unattended 24/7 Long-Running Operations
+1. **Zero Prompt Blocking**:
+   - Pada mode background/otomatis (`--auto` atau Docker container), sistem tidak boleh memanggil `input()` yang dapat membekukan container.
+2. **Clean Memory Recycling**:
+   - Gunakan context manager `with Camoufox(...) as browser:` pada setiap iterasi agar seluruh child process browser ditutup rapat dan memori dibebaskan secara berkala.
