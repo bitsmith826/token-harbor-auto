@@ -88,8 +88,23 @@ def _tunggu_loading(page, maks_detik=40):
 
 def login_router(page, simpan=True):
     """Login 9Router (pakai page apa adanya). Return True kalau masuk."""
-    page.goto(f"{_router_url()}/login", wait_until="domcontentloaded")
+    url = f"{_router_url()}/login"
+    try:
+        page.goto(url, wait_until="domcontentloaded")
+    except Exception as e:
+        _log(f"Gagal membuka URL 9Router ({url}): {e}", "ERROR")
+        return False
+
     _tunggu_loading(page)
+
+    # Deteksi apakah server 9Router / Cloudflare Tunnel error
+    try:
+        body_txt = (page.inner_text("body") or "").lower()
+        if any(err in body_txt for err in ("error 1033", "argo tunnel", "error 530", "502 bad gateway", "504 gateway")):
+            _log("Server 9Router / Cloudflare Tunnel sedang down (Error 1033/530). Cek layanan cloudflared / container 9Router di VPS!", "ERROR")
+            return False
+    except Exception:
+        pass
 
     if _sudah_login(page):
         _log("Session 9Router masih aktif (tidak perlu login)")
@@ -99,8 +114,13 @@ def login_router(page, simpan=True):
 
     _log("Session mati / belum login -> login 9Router ...")
     field = page.locator("input[type='password']")
+    try:
+        field.wait_for(timeout=10_000)
+    except Exception:
+        pass
+
     if field.count() == 0:
-        _log("Field password tidak ditemukan", "ERROR")
+        _log("Field password tidak ditemukan (pastikan web 9Router normal dan bisa diakses)", "ERROR")
         return False
     _router_pw = _router_password()
     if not _router_pw:
