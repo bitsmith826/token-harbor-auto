@@ -327,12 +327,12 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
                     time.sleep(2)
                     continue
 
-            if status_signup in ("noform", "timeout"):
-                # Turnstile Cloudflare memblokir proxy ini sehingga form pendaftaran tidak muncul
+            if status_signup in ("noform", "timeout", "fast"):
+                # Turnstile Cloudflare memblokir atau menandai proxy ini
                 if pakai_proxy and proxies:
                     global_proxy_idx += 1
-                    signup.log(f"Turnstile memblokir proxy ini ({status_signup}) -> beralih ke proxy berikutnya...", "WARN")
-                    time.sleep(2)
+                    signup.log(f"Turnstile memblokir/menandai proxy ini ({status_signup}) -> langsung beralih ke proxy berikutnya...", "WARN")
+                    time.sleep(1.5)
                     continue
 
             if status_signup == "network_minute":

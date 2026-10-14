@@ -313,15 +313,22 @@ def _page_context_baru(browser, proxy=None):
 def _tunggu_field(page, maks_iter=20, diam=False):
     if not diam:
         log("Menunggu field email/password (Turnstile) ...")
-    for _ in range(maks_iter):
-        try:
-            if page.locator('input[type="email"]').count() > 0 and \
-               page.locator('input[type="password"]').count() > 0:
-                return True
-        except Exception:
-            pass
-        time.sleep(3)
-    return False
+    try:
+        # Gunakan Playwright wait_for agar seketika mendeteksi saat Turnstile lewat
+        page.locator('input[type="email"]').wait_for(state="visible", timeout=maks_iter * 1000)
+        page.locator('input[type="password"]').wait_for(state="visible", timeout=4000)
+        return True
+    except Exception:
+        # Fallback pengecekan count cepat
+        for _ in range(3):
+            try:
+                if page.locator('input[type="email"]').count() > 0 and \
+                   page.locator('input[type="password"]').count() > 0:
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
+        return False
 
 
 def _klik_tombol(page, daftar_nama, label="tombol"):
@@ -821,11 +828,11 @@ def _ketik_manusiawi(page, selector, teks):
         try:
             el = page.locator(selector)
             el.click()
-            time.sleep(random.uniform(0.2, 0.6))
-            el.type(teks, delay=random.randint(45, 130))
+            time.sleep(random.uniform(0.1, 0.2))
+            el.type(teks, delay=random.randint(25, 55))
             return
         except Exception:
-            time.sleep(0.5)
+            time.sleep(0.3)
     # jalan terakhir: fill() lebih baik daripada gagal total
     page.locator(selector).fill(teks)
 
@@ -845,12 +852,12 @@ def _jalankan_signup(page, email, password):
         log("Field tidak muncul (Turnstile belum lewat?)", "ERROR")
         return "noform"
 
-    # Input form dengan jeda manusiawi agar tidak memicu 'doing that a bit fast'
+    # Input form dengan ketikan per huruf realistis agar Turnstile tidak mendeteksi bot
     log("Mengisi form ...")
-    page.locator('input[type="email"]').fill(email)
-    time.sleep(1.2)
-    page.locator('input[type="password"]').fill(password)
-    time.sleep(2.5)
+    _ketik_manusiawi(page, 'input[type="email"]', email)
+    time.sleep(0.4)
+    _ketik_manusiawi(page, 'input[type="password"]', password)
+    time.sleep(0.8)
     log("Klik Create account")
     _klik_create(page)
 
@@ -879,25 +886,12 @@ def _jalankan_signup(page, email, password):
             continue
 
         if notice == "fast":
-            fast_retry += 1
-            if fast_retry > MAX_FAST_RETRY:
-                log("Batas retry 'fast' tercapai", "ERROR")
-                _snapshot(page, "fast_limit")
-                return "fast_limit"
-            log(f"'doing that a bit fast' -> jeda {FAST_WAIT_SEC}s "
-                f"(retry {fast_retry}/{MAX_FAST_RETRY})", "WARN")
-            _snapshot(page, f"fast{fast_retry}")
-            tampilan.tunggu(FAST_WAIT_SEC, "Jeda keamanan Turnstile")
-            _tunggu_tombol_siap(page)
-            _tunggu_field(page, maks_iter=40, diam=True)
-            try:
-                page.locator('input[type="password"]').fill(password)
-                time.sleep(1.5)
-            except Exception:
-                _snapshot(page, f"fast{fast_retry}_nofield")
-                return "nofield"
-            _klik_create(page)
-            continue
+            # Jika terdeteksi 'doing that a bit fast', Cloudflare sudah menandai IP proxy ini.
+            # Menunggu 20s x 10x hanya membuang waktu dan berujung 'network_minute'.
+            # Langsung failover instan ke proxy fresh berikutnya!
+            log("Cloudflare Turnstile menandai IP ini ('doing that a bit fast') -> langsung beralih ke proxy berikutnya...", "WARN")
+            _snapshot(page, "fast_failover")
+            return "fast"
 
         if notice in ("network_hour", "network_minute"):
             _snapshot(page, notice)
