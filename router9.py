@@ -15,8 +15,6 @@ import os
 import time
 from pathlib import Path
 
-from camoufox.sync_api import Camoufox
-
 import tampilan
 
 HERE = Path(__file__).resolve().parent
@@ -197,10 +195,29 @@ def _cari_slug(page):
 def daftar_koneksi(page):
     """Baca semua nama koneksi (email) di provider Token Harbor.
 
-    Andal terhadap halaman panjang: scroll sampai bawah, kumpulkan email.
-    Dipakai mode 4 untuk deteksi duplikat sebelum input.
+    Pertama coba via API internal 9Router (sangat cepat & akurat 100%).
+    Fallback ke DOM scroll jika diperlukan.
     Return: set email koneksi yg sudah ada di 9Router.
     """
+    try:
+        data = page.evaluate("""async () => {
+            try {
+                const res = await fetch('/api/providers');
+                if (res.ok) {
+                    const json = await res.json();
+                    return (json.connections || [])
+                        .filter(c => ((c.providerSpecificData || {}).nodeName || '').toLowerCase() === 'token harbor')
+                        .map(c => c.name)
+                        .filter(Boolean);
+                }
+            } catch (e) {}
+            return null;
+        }""")
+        if data is not None:
+            return set(str(n).strip() for n in data if str(n).strip())
+    except Exception:
+        pass
+
     if not _buka_providers(page):
         return set()
     if not _buka_provider(page):
@@ -218,7 +235,7 @@ def daftar_koneksi(page):
             page.evaluate("()=>window.scrollTo(0, document.body.scrollHeight)")
         except Exception:
             break
-        time.sleep(0.7)
+        time.sleep(0.5)
         if page.evaluate("()=>window.scrollY") == sebelum:
             break
     return sudah
@@ -314,18 +331,17 @@ def buat_provider(page):
 
 # ------------------------------------------------------------- add key
 def _form_add_key(page):
-    """Klik Add API Key. Return True kalau form muncul."""
+    """Klik Add API Key. Return True kalau form muncul (mode cepat)."""
     for percobaan in range(1, 4):
         try:
-            tombol = page.get_by_role("button", name="Add API Key").first
-            tombol.wait_for(state="visible", timeout=20_000)
-            tombol.click(timeout=20_000)
-            time.sleep(3)
+            tombol = page.locator("button:has-text('Add API Key')").first
+            tombol.wait_for(state="visible", timeout=10_000)
+            tombol.click()
+            # Tunggu form modal muncul secara dinamis (tanpa sleep kaku)
+            page.locator("input[placeholder='Production Key']").wait_for(state="visible", timeout=5_000)
             return True
         except Exception as e:
             _log(f"Gagal buka form Add API Key (coba {percobaan}/3): {e}", "WARN")
-            # buka ulang halaman provider (halaman bisa belum termuat
-            # setelah provider baru dibuat)
             try:
                 _buka_provider(page)
             except Exception:
@@ -335,11 +351,15 @@ def _form_add_key(page):
 
 
 def _isi_key(page, email, api_key):
+    """Langkah 1 & 2: Input Nama (email) dan API Key."""
     try:
-        page.locator("input[placeholder='Production Key']").fill(email)
-        time.sleep(0.5)
-        page.locator("input[type='password']").first.fill(api_key)
-        time.sleep(0.5)
+        inp_email = page.locator("input[placeholder='Production Key']").first
+        inp_email.wait_for(state="visible", timeout=5_000)
+        inp_email.fill(email)
+
+        inp_pw = page.locator("input[type='password']").first
+        inp_pw.fill(api_key)
+        time.sleep(0.2)
         return True
     except Exception as e:
         _log(f"Gagal isi form API key: {e}", "ERROR")
@@ -347,95 +367,130 @@ def _isi_key(page, email, api_key):
 
 
 def _check_key(page):
-    """Klik Check, tunggu hasil. Return True kalau 'Valid' terdeteksi."""
-    # tombol Check di-retry (server 9Router bisa lambat merespon)
+    """Langkah 3 & 4: Klik Check, tunggu proses, pastikan status VALID."""
+    modal = page.locator("div.fixed:has(input[placeholder='Production Key'])").first
+    if modal.count() == 0:
+        modal = page.locator("div.fixed:has-text('Bulk Add')").first
+    if modal.count() == 0:
+        modal = page
+
+    check_btn = modal.locator("button:has-text('Check')").first
     klik_ok = False
     for percobaan in range(1, 4):
         try:
-            tombol = page.get_by_role("button", name="Check")
-            tombol.wait_for(state="visible", timeout=20_000)
-            tombol.click(timeout=30_000)
+            check_btn.wait_for(state="visible", timeout=10_000)
+            check_btn.click()
             klik_ok = True
             break
         except Exception as e:
             _log(f"Klik Check gagal (coba {percobaan}/3): {e}", "WARN")
-            time.sleep(3)
+            time.sleep(1)
     if not klik_ok:
         _log("Gagal klik Check setelah 3 percobaan", "ERROR")
         return False
 
-    # tunggu muncul Valid / invalid.
-    # CATATAN: respons /validate bisa lambat (60-90 detik saat server berat),
-    # jadi timeout harus panjang agar key valid tidak salah dideteksi.
-    for _ in range(240):  # 240 x 0.5s = 120 detik
+    _log("Menunggu hasil validasi dari server 9Router...", "STEP")
+
+    # Tunggu sampai tombol Check mulai memproses atau respons keluar (maks 45 detik)
+    for _ in range(90):  # 90 x 0.5s = 45 detik
+        time.sleep(0.5)
+
+        c_txt = (check_btn.text_content() or "").strip().lower()
+        # Jika tombol masih dalam status 'Checking...', tunggu
+        if "checking" in c_txt:
+            continue
+
         try:
-            txt = page.inner_text("body") or ""
+            txt = (modal.inner_text() or "").lower()
         except Exception:
             txt = ""
-        if "Valid" in txt:
-            return True
-        if "invalid" in txt.lower() or "not valid" in txt.lower():
+
+        # Cek jika ada indikasi error / invalid di dalam modal
+        if any(err in txt for err in ["invalid", "not valid", "unauthorized", "gagal", "401"]):
+            _log("Hasil validasi: API key TIDAK VALID / Ditolak server", "ERROR")
             return False
-        time.sleep(0.5)
-    _log("Check API key: tidak ada respons (120 detik)", "WARN")
+
+        # Pastikan status 'valid' benar-benar muncul di dalam modal form atau tombol
+        if "valid" in txt or "valid" in c_txt:
+            return True
+
+    _log("Check API key: timeout respons (45 detik)", "WARN")
     return False
 
 
 def _save_key(page):
-    """Isi Default Model lalu Save (wajib pertama kali). Return True sukses."""
+    """Langkah 5: HANYA setelah Valid -> Isi Default Model lalu Save."""
+    modal = page.locator("div.fixed:has(input[placeholder='Production Key'])").first
+    if modal.count() == 0:
+        modal = page.locator("div.fixed:has-text('Bulk Add')").first
+    if modal.count() == 0:
+        modal = page
+
+    # Isi Default Model setelah key dipastikan valid
     try:
-        page.locator("input[placeholder='gpt-4o-mini']").fill(DEFAULT_MODEL)
-        time.sleep(1)
+        model_input = modal.locator("input[placeholder='gpt-4o-mini']").first
+        if model_input.count() > 0:
+            model_input.fill(DEFAULT_MODEL)
+            time.sleep(0.2)
     except Exception as e:
         _log(f"Gagal isi Default Model: {e}", "ERROR")
         return False
 
-    tombol = page.locator("button:has-text('Save')")
+    tombol = modal.locator("button:has-text('Save')").first
     try:
-        disabled = tombol.is_disabled()
-    except Exception:
-        disabled = False
-    if disabled:
-        _log("Tombol Save masih disabled", "ERROR")
-        return False
+        # Tunggu tombol Save enabled
+        for _ in range(15):
+            try:
+                if not tombol.is_disabled():
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
 
-    try:
-        page.get_by_role("button", name="Save").click(timeout=30_000)
+        tombol.click()
     except Exception as e:
         _log(f"Gagal klik Save: {e}", "ERROR")
         return False
-    time.sleep(5)
 
+    # Tunggu modal tertutup (elemen input Production Key menghilang dari DOM)
     try:
-        txt = page.inner_text("body") or ""
+        modal.locator("input[placeholder='Production Key']").wait_for(state="hidden", timeout=10_000)
     except Exception:
-        txt = ""
-    return True  # simpan tetap dianggap sukses; pengecekan koneksi di luar
+        time.sleep(1)
+
+    return True
 
 
 def _koneksi_ada(page, email):
     """Cek apakah koneksi dengan nama=email sudah ada (anti duplikat)."""
     try:
-        txt = page.inner_text("body") or ""
+        return email in daftar_koneksi(page)
     except Exception:
-        return False
-    return email in txt
+        try:
+            txt = page.inner_text("body") or ""
+            return email in txt
+        except Exception:
+            return False
 
 
 def tambah_api_key(page, email, api_key):
     """
-    Tambah 1 API key ke provider Token Harbor.
+    Tambah 1 API key ke provider Token Harbor (mode cepat & efisien).
+    Jika sudah berada di halaman detail provider, langsung input tanpa reload!
     Return: 'tersimpan' | 'sudah_ada' | 'invalid' | 'error'
     """
-    _buka_providers(page)
-
-    if not _provider_ada(page):
-        if not buat_provider(page):
+    # Navigasi ke detail provider HANYA jika belum berada di halamannya
+    curr_url = page.url or ""
+    if "/dashboard/providers/" not in curr_url or page.locator("button:has-text('Add API Key')").count() == 0:
+        if not _provider_ada(page):
+            _buka_providers(page)
+            if not _provider_ada(page):
+                if not buat_provider(page):
+                    return "error"
+        if not _buka_provider(page):
             return "error"
-    if not _buka_provider(page):
-        return "error"
 
-    # anti duplikat: koneksi dgn nama email yg sama sudah ada -> skip
+    # Anti duplikat lokal
     if _koneksi_ada(page, email):
         _log(f"Koneksi {email} sudah ada di 9Router -> skip", "OK")
         return "sudah_ada"
@@ -447,7 +502,6 @@ def tambah_api_key(page, email, api_key):
 
     if not _check_key(page):
         _log(f"API key {email} TIDAK VALID di 9Router", "WARN")
-        _simpan_session(page)
         return "invalid"
 
     _log(f"API key {email} VALID -> simpan ...", "OK")
@@ -455,29 +509,25 @@ def tambah_api_key(page, email, api_key):
         return "error"
 
     _log(f"API key tersimpan ke 9Router: {email}", "OK")
-    _simpan_session(page)
     return "tersimpan"
 
 
 # -------------------------------------------------------------- entry point
 def proses_router9(page, email, api_key):
     """
-    Dipanggil setelah API key Token Harbor dibuat (browser IP asli).
-    Memakai page yang ada. Handle login otomatis (session persisten).
+    Dipanggil untuk input API key ke 9Router.
+    Memakai page yang ada. Cek session login secara andal tanpa reload berlebihan.
     Return: 'tersimpan' | 'invalid' | 'error'
     """
     _log("Input ke 9Router: " + email, "INFO")
 
-    # Cek login ANDAL: goto halaman providers dulu supaya status login
-    # terbaca dari server (bukan dari halaman lama yg masih ke-cache --
-    # kalau cookies baru saja dihapus, page.url & body masih halaman
-    # provider lama -> _sudah_login bisa false-positive).
-    try:
-        page.goto(f"{_router_url()}/dashboard/providers",
-                  wait_until="domcontentloaded")
-    except Exception:
-        pass
-    time.sleep(2)
+    # Jika belum di dashboard providers, buka sekali saja
+    if "/dashboard/providers" not in (page.url or ""):
+        try:
+            page.goto(f"{_router_url()}/dashboard/providers", wait_until="domcontentloaded")
+            _tunggu_loading(page, maks_detik=5)
+        except Exception:
+            pass
 
     if not _sudah_login(page):
         _log("Session 9Router mati -> login ulang ...", "WARN")

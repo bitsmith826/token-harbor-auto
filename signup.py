@@ -27,15 +27,13 @@ import time
 import random
 import string
 import datetime
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from faker import Faker
 
-from camoufox.sync_api import Camoufox
-
 import gmail_inbox
 import tampilan
+import urllib.request
+import urllib.error
 
 # ---------------------------------------------------------------- paths
 HERE = Path(__file__).resolve().parent
@@ -66,12 +64,8 @@ SIGNUP_URL = "https://tokenharbor.ai/signup"
 LOGIN_URL = "https://tokenharbor.ai/login"
 DASHBOARD_URL = "https://tokenharbor.ai/dashboard"
 
-# Jeda saat situs minta melambat ("doing that a bit fast").
-# Terbukti dari tes manual 13 Okt: menunggu ~35s lalu klik SEKALI -> berhasil.
-# Versi lama (10s, sampai 10 retry = 11x klik dalam 100s) justru menaikkan
-# hukuman server menjadi "Our team has been alerted" / form tidak muncul.
-FAST_WAIT_SEC = 35
-MAX_FAST_RETRY = 3
+FAST_WAIT_SEC = 20
+MAX_FAST_RETRY = 10
 
 FAST_PATTERNS = [
     "doing that a bit fast",
@@ -186,6 +180,83 @@ def _snapshot(page, tag):
         log(f"snapshot gagal: {e}", "WARN")
 
 
+def ambil_proxy_fresh_otomatis(target=15, simpan=True):
+    """Scrape proxy gratisan fresh dari internet & uji respon langsung ke tokenharbor.ai."""
+    import urllib.request
+    import json
+    import concurrent.futures
+
+    log("Mengunduh daftar proxy gratisan fresh dari internet ...", "STEP")
+    sources = [
+        "https://proxylist.geonode.com/api/proxy-list?limit=150&page=1&sort_by=lastChecked&sort_type=desc",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=all&ssl=yes&anonymity=elite",
+        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
+        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+        "https://raw.githubusercontent.com/mertguvencli/http-proxy-list/main/proxy-list/data.txt",
+    ]
+    candidates = set()
+    for url in sources:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                text = resp.read().decode("utf-8", errors="ignore")
+                if "geonode" in url:
+                    data = json.loads(text)
+                    for item in data.get("data", []):
+                        ip = item.get("ip")
+                        port = item.get("port")
+                        if ip and port:
+                            candidates.add(f"{ip}:{port}")
+                else:
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line.startswith("http://") or line.startswith("https://"):
+                            line = line.split("://")[-1]
+                        if ":" in line and not line.startswith("#"):
+                            parts = line.split(":")
+                            if len(parts) >= 2 and parts[0].replace(".", "").isdigit():
+                                candidates.add(f"{parts[0]}:{parts[1]}")
+        except Exception:
+            pass
+
+    cand_list = list(candidates)
+    log(f"Terkumpul {len(cand_list)} kandidat proxy. Menguji respon ke Token Harbor...", "INFO")
+
+    def _check(p):
+        p_url = f"http://{p}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": p_url, "https": p_url}))
+        try:
+            req = urllib.request.Request("https://tokenharbor.ai/signup", headers={"User-Agent": "Mozilla/5.0"})
+            with opener.open(req, timeout=4) as resp:
+                if resp.status == 200:
+                    return p
+        except Exception:
+            pass
+        return None
+
+    working = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        futures = [executor.submit(_check, p) for p in cand_list[:500]]
+        for f in concurrent.futures.as_completed(futures):
+            res = f.result()
+            if res:
+                working.append(res)
+                if len(working) >= target:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+
+    if working and simpan:
+        header = "# Daftar proxy untuk signup Token Harbor (satu per baris)\n# Format: host:port\n# Otomatis failover jika kena limit atau mati\n\n"
+        with open(HERE / "proxies.txt", "w", encoding="utf-8") as f:
+            f.write(header + "\n".join(working) + "\n")
+        log(f"Berhasil menyimpan {len(working)} proxy fresh ke proxies.txt!", "OK")
+    elif not working:
+        log("Tidak ada proxy fresh baru yang lolos uji respon", "WARN")
+
+    return working
+
+
 def _baca_proxies():
     """Baca daftar proxy dari .env (PROXY=...) atau file proxies.txt. Format: server:port:username:password atau http://user:pass@host:port"""
     proxies = []
@@ -225,48 +296,6 @@ def _parse_proxy(s):
     raise ValueError(f"format proxy gak dikenali: {s}")
 
 
-def cek_proxy(s, timeout=20):
-    """Tes cepat: apakah proxy masih hidup?
-
-    Dipakai SEBELUM membuka browser, supaya proxy mati tidak dipakai sama
-    sekali. Mengembalikan True kalau proxy bisa dilewati.
-
-    Catatan: Camoufox dengan geoip=True juga melakukan request lewat proxy,
-    dan itulah yang dulu gagal dengan "Failed to get IP address ...
-    Tunnel connection failed: 403 Forbidden".
-    """
-    try:
-        p = _parse_proxy(s)
-        server = p["server"]
-        if p.get("username"):
-            u = urllib.parse.urlparse(server)
-            netloc = f"{p['username']}:{p.get('password', '')}@{u.hostname}:{u.port}"
-            server = f"{u.scheme}://{netloc}"
-        handler = urllib.request.ProxyHandler({"http": server, "https": server})
-        opener = urllib.request.build_opener(handler)
-        req = urllib.request.Request("https://ipecho.net/plain",
-                                     headers={"User-Agent": "curl/8"})
-        with opener.open(req, timeout=timeout) as r:
-            return r.status == 200
-    except Exception:
-        return False
-
-
-def saring_proxy(daftar, log=None):
-    """Buang proxy yang mati. Return daftar proxy yang masih hidup.
-
-    Dicek sekali di awal, jadi batch tidak membuang waktu mengulang proxy
-    yang sudah jelas mati.
-    """
-    hidup = []
-    for s in daftar:
-        if cek_proxy(s):
-            hidup.append(s)
-        elif log:
-            log("Proxy mati / tidak bisa dipakai -> dibuang", "WARN")
-    return hidup
-
-
 def _page_context_baru(browser, proxy=None):
     """Bikin context + page. proxy=None -> IP asli."""
     ctx = browser.new_context(proxy=proxy) if proxy else browser.new_context()
@@ -276,12 +305,7 @@ def _page_context_baru(browser, proxy=None):
     return ctx, page
 
 
-def _tunggu_field(page, maks_iter=30, diam=False):
-    """Tunggu field email/password muncul.
-
-    maks_iter=30 x 3s = 90 detik. Versi lama 90 x 3s = 4,5 menit per percobaan;
-    kalau form tidak muncul dalam 90 detik, biasanya memang tidak akan muncul.
-    """
+def _tunggu_field(page, maks_iter=90, diam=False):
     if not diam:
         log("Menunggu field email/password (Turnstile) ...")
     for _ in range(maks_iter):
@@ -472,34 +496,22 @@ def _tunggu_email_sent(page, maks_iter=30):
 
 
 def _buka_link_verifikasi(page, link):
-    """Buka link verifikasi di tab baru, tunggu kata 'success'."""
-    halaman_baru = None
+    """Buka link verifikasi langsung di tab aktif, konfirmasi status verified."""
     try:
-        # context manager: future ditutup rapi walau goto gagal
-        with page.context.expect_page(timeout=30000) as info:
-            try:
-                page.goto(link, wait_until="domcontentloaded")
-            except Exception:
-                pass
-        halaman_baru = info.value
-    except Exception:
-        # tidak ada popup / timeout -> buka langsung di tab ini
-        try:
-            page.goto(link, wait_until="domcontentloaded")
-        except Exception:
-            pass
-        halaman_baru = page
+        page.goto(link, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        log(f"Navigasi link verifikasi: {e}", "WARN")
 
-    for _ in range(20):
-        txt = _text_of(halaman_baru).lower()
-        url = (halaman_baru.url or "").lower()
-        if "success" in txt or "verified" in txt or "email verified" in txt:
-            return True, halaman_baru
+    for _ in range(15):
+        txt = _text_of(page).lower()
+        url = (page.url or "").lower()
+        if any(w in txt for w in ("success", "verified", "email verified", "email address verified", "thank you", "confirmed")):
+            return True, page
         if "dashboard" in url and "verify" not in url:
-            # sudah balik ke dashboard setelah verifikasi
-            return True, halaman_baru
-        time.sleep(2)
-    return False, halaman_baru
+            # sudah otomatis redirect ke dashboard setelah verifikasi
+            return True, page
+        time.sleep(1)
+    return False, page
 
 
 def buat_api_key(page, email):
@@ -703,14 +715,24 @@ def signup_once(headless):
 
     email = password = status = None
     network_retry = 0
-    MAX_NETWORK_RETRY = 5
+    MAX_NETWORK_RETRY = max(5, len(proxies)) if (proxies and proxies != [None]) else 5
     selesai = False
+    proxy_idx = 0
     while not selesai:
-        proxy_str = proxies[0] if proxies else None
+        proxy_str = proxies[proxy_idx % len(proxies)] if proxies else None
         email, password = gen_email(), gen_password()
-        label = proxy_str if proxy_str else "IP ASLI"
-        tampilan.bagian("SIGNUP")
-        tampilan.rinci("via", label)
+        ip_info = tampilan.cek_ip_publik()
+        ip_asli = ip_info.get("ipv4") or "Tidak terdeteksi"
+        warp_tag = " [WARP Shared]" if ip_info.get("is_warp") else ""
+        if proxy_str:
+            p_dict = _parse_proxy(proxy_str)
+            p_clean = p_dict.get("server", "").replace("http://", "").replace("https://", "")
+            label = f"Proxy ({p_clean})"
+        else:
+            label = f"IP Asli ({ip_asli}{warp_tag})"
+
+        tampilan.bagian("SIGNUP AKUN")
+        tampilan.rinci("Jalur / IP", label)
         tampilan.rinci("Email", email)
         tampilan.rinci("Password", password)
 
@@ -719,36 +741,45 @@ def signup_once(headless):
         if proxy_str:
             launch["proxy"] = _parse_proxy(proxy_str)
 
-        with Camoufox(**launch) as browser:
-            page = browser.new_page()
-            page.set_default_timeout(90_000)
-            page.set_default_navigation_timeout(90_000)
-            status = _jalankan_signup(page, email, password)
-        # browser proxy ditutup di sini (context manager) -> proxy berhenti dipakai
+        from camoufox.sync_api import Camoufox
+        try:
+            with Camoufox(**launch) as browser:
+                page = browser.new_page()
+                timeout_proxy = 35_000 if proxy_str else 60_000
+                page.set_default_timeout(timeout_proxy)
+                page.set_default_navigation_timeout(timeout_proxy)
+                status = _jalankan_signup(page, email, password)
+        except Exception as e:
+            log(f"Proxy mati/error jaringan: {e}", "WARN")
+            status = "network_error"
 
         if status == "dashboard":
             selesai = True
             break
 
-        if status == "network":
-            network_retry += 1
-            if network_retry > MAX_NETWORK_RETRY:
-                log(f"Batas retry network ({MAX_NETWORK_RETRY}) tercapai", "ERROR")
-                break
+        network_retry += 1
+        if network_retry > MAX_NETWORK_RETRY:
+            log(f"Batas retry ({MAX_NETWORK_RETRY}) tercapai", "ERROR")
+            break
+
+        if status in ("network", "network_hour"):
             if not proxy_str:
-                # IP asli kena "Too many sign-ups ... try again in an hour"
-                # -> reconnect gak ada gunanya, IP-nya sama. Tunggu 1 jam.
-                log("Rate limit pakai IP asli -> tunggu 1 jam lalu coba lagi "
-                    f"(retry {network_retry}/{MAX_NETWORK_RETRY})", "WARN")
-                time.sleep(3600)
+                log(f"Rate limit 1 jam pada {ip_asli} -> mulai cooldown 1 jam "
+                    f"(retry {network_retry}/{MAX_NETWORK_RETRY})", "LIMIT")
+                tampilan.tunggu(3600, "Cooldown IP Rate-Limit")
                 continue
-            # proxy rotasi tiap koneksi -> reconnect = IP baru
-            log(f"Rate limit network -> reconnect proxy (IP baru) "
-                f"(retry {network_retry}/{MAX_NETWORK_RETRY})", "WARN")
-            time.sleep(5)
+            proxy_idx += 1
+            log(f"Proxy kena limit (too many signup) -> coba proxy berikutnya (retry {network_retry}/{MAX_NETWORK_RETRY})", "WARN")
+            time.sleep(2)
             continue
 
-        # fast_limit / nofield / timeout -> coba lagi juga (IP baru)
+        if status == "network_error":
+            if proxy_str:
+                proxy_idx += 1
+                log(f"Proxy mati/terputus -> beralih ke proxy berikutnya...", "WARN")
+                time.sleep(2)
+                continue
+
         log(f"Gagal signup ({status}) -> coba lagi", "WARN")
         continue
 
@@ -767,28 +798,47 @@ def signup_once(headless):
     return email, password, ("verified" if ok else "dashboard_noverify")
 
 
+def _ketik_manusiawi(page, selector, teks):
+    """Ketik per huruf dengan jeda acak, seperti manusia.
+
+    page.fill() mengisi seluruh teks sekaligus -> signature bot yang mudah
+    ditangkap Turnstile. page.type() dengan delay menghasilkan event
+    keydown/keyup per huruf seperti keyboard asli.
+    """
+    for _ in range(3):
+        try:
+            el = page.locator(selector)
+            el.click()
+            time.sleep(random.uniform(0.2, 0.6))
+            el.type(teks, delay=random.randint(45, 130))
+            return
+        except Exception:
+            time.sleep(0.5)
+    # jalan terakhir: fill() lebih baik daripada gagal total
+    page.locator(selector).fill(teks)
+
+
 def _jalankan_signup(page, email, password):
     """Jalankan signup di page yg sudah ada. Return status string."""
-    log("Membuka beranda ...")
-    page.goto(BASE_URL, wait_until="domcontentloaded")
-
+    # Optimasi hemat kuota proxy: blokir aset gambar/media/font dekoratif
     try:
-        btn = page.get_by_role("link", name=re.compile(r"try free", re.I)).first
-        btn.wait_for(timeout=20000)
-        btn.click()
-        log('Klik "Try free"')
+        page.route("**/*.{png,jpg,jpeg,webp,gif,woff,woff2}", lambda route: route.abort())
     except Exception:
-        log("'Try free' tidak ketemu -> buka halaman signup langsung")
-        page.goto(SIGNUP_URL, wait_until="domcontentloaded")
+        pass
+
+    log("Membuka halaman signup ...")
+    page.goto(SIGNUP_URL, wait_until="domcontentloaded")
 
     if not _tunggu_field(page):
         log("Field tidak muncul (Turnstile belum lewat?)", "ERROR")
         return "noform"
 
+    # Input form dengan jeda manusiawi agar tidak memicu 'doing that a bit fast'
     log("Mengisi form ...")
     page.locator('input[type="email"]').fill(email)
+    time.sleep(1.2)
     page.locator('input[type="password"]').fill(password)
-    time.sleep(0.5)
+    time.sleep(2.5)
     log("Klik Create account")
     _klik_create(page)
 
@@ -815,18 +865,15 @@ def _jalankan_signup(page, email, password):
                 log("Batas retry 'fast' tercapai", "ERROR")
                 _snapshot(page, "fast_limit")
                 return "fast_limit"
-            log(f"'doing that a bit fast' -> tunggu {FAST_WAIT_SEC}s "
+            log(f"'doing that a bit fast' -> jeda {FAST_WAIT_SEC}s "
                 f"(retry {fast_retry}/{MAX_FAST_RETRY})", "WARN")
             _snapshot(page, f"fast{fast_retry}")
-            # jeda + sedikit acak, supaya polanya tidak teratur seperti bot
-            time.sleep(FAST_WAIT_SEC + random.uniform(3, 12))
+            tampilan.tunggu(FAST_WAIT_SEC, "Jeda keamanan Turnstile")
             _tunggu_tombol_siap(page)
             _tunggu_field(page, maks_iter=40, diam=True)
             try:
-                pw = page.locator('input[type="password"]')
-                pw.click()
-                time.sleep(random.uniform(0.3, 0.8))
-                pw.type(password, delay=random.randint(50, 140))
+                page.locator('input[type="password"]').fill(password)
+                time.sleep(1.5)
             except Exception:
                 _snapshot(page, f"fast{fast_retry}_nofield")
                 return "nofield"
@@ -895,7 +942,7 @@ def login_dashboard(page, email, password):
 
     for _ in range(40):
         if _di_dashboard(page):
-            log("Login berhasil, dashboard terbuka", "OK")
+            log("Sudah di dashboard", "OK")
             return "ok"
         try:
             txt = _text_of(page).lower()
