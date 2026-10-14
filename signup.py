@@ -194,6 +194,11 @@ def ambil_proxy_fresh_otomatis(target=15, simpan=True):
         "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
         "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
         "https://raw.githubusercontent.com/mertguvencli/http-proxy-list/main/proxy-list/data.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
+        "https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt",
     ]
     candidates = set()
     for url in sources:
