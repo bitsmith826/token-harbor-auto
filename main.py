@@ -25,6 +25,7 @@ FILE:
 import concurrent.futures
 import os
 import queue
+import signal
 import sys
 import threading
 import time
@@ -38,6 +39,21 @@ import tampilan
 HERE = Path(__file__).resolve().parent
 RESULT_TXT = HERE / "result.txt"
 KEYS_TXT = HERE / "keys.txt"
+
+
+def _sigint_handler(sig, frame):
+    """Handler instan saat user menekan Ctrl+C agar tidak digantung socket browser."""
+    try:
+        tampilan.log("Program dihentikan oleh pengguna (Ctrl+C).", "WARN")
+    except Exception:
+        pass
+    os._exit(0)
+
+
+try:
+    signal.signal(signal.SIGINT, _sigint_handler)
+except Exception:
+    pass
 
 
 def _ambil_camoufox():
@@ -431,16 +447,26 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None, worker_override=No
     tampilan.rinci("Jalur", f"Proxy Queue ({proxy_queue.qsize()} proxy)" if pakai_proxy else "IP Asli")
 
     if worker_count > 1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_worker_loop, w_id) for w_id in range(1, worker_count + 1)]
-            try:
-                for f in concurrent.futures.as_completed(futures):
-                    f.result()
-            except KeyboardInterrupt:
-                signup.log("Dihentikan oleh pengguna (Ctrl+C). Menunggu worker selesai...", "WARN")
-                stop_event.set()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+        futures = [executor.submit(_worker_loop, w_id) for w_id in range(1, worker_count + 1)]
+        try:
+            while not stop_event.is_set():
+                if all(f.done() for f in futures):
+                    break
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            signup.log("Dihentikan oleh pengguna (Ctrl+C). Menghentikan semua worker...", "WARN")
+            stop_event.set()
+            executor.shutdown(wait=False, cancel_futures=True)
+            os._exit(0)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
     else:
-        _worker_loop(1)
+        try:
+            _worker_loop(1)
+        except KeyboardInterrupt:
+            signup.log("Dihentikan oleh pengguna (Ctrl+C). Menghentikan proses...", "WARN")
+            os._exit(0)
 
     tampilan.ringkasan({
         "Mode": mode.upper(),
