@@ -79,21 +79,30 @@ Isi `.env`:
 
 ## Fitur Utama & Ketahanan Otomasi
 
-- **Smart Auto-Scraper Proxy**: Ketika `proxies.txt` kosong atau habis terpakai, bot secara otomatis mengunduh ribuan proxy publik dari **11 sumber GitHub & API aktif**, lalu mengujinya secara paralel (50 workers) langsung ke Token Harbor (timeout 4s). Hanya 20 proxy terbaik & fresh yang disimpan.
-- **Fail-Fast 45 Detik**: Batas tunggu respon submit dipangkas dari 6 menit menjadi **45 detik**, dilengkapi **heartbeat log berkala** setiap 9 detik agar status bot selalu terpantau transparan dan tidak pernah membeku (*freeze*).
-- **Circuit Breaker (Anti-Stuck)**: Jika 1 slot akun gagal berturut-turut pada belasan proxy (default: sesuai jumlah proxy di memori), bot secara cerdas melewati (*skip*) slot tersebut dan langsung membuka slot akun berikutnya agar tidak membuang waktu.
-- **Pacing Turnstile Manusiawi**: Ketikan form diberi jeda realistis (1.2s - 2.5s) untuk mencegah deteksi bot Cloudflare (*"doing that a bit fast"*).
+- **Multi-Worker Concurrency**: Eksekusi multi-threading (1 sampai 5 worker simultan) yang menjalankan instance browser independen secara paralel. Output akun dan API key meningkat berlipat ganda sesuai jumlah worker.
+- **Dedicated Proxy Queue**: Antrean proxy thread-safe eksklusif di mana setiap worker memegang proxy berbeda (mencegah tabrakan IP/rate limit). Jika proxy antrean menipis (< 3), sistem secara otomatis mengunduh & menguji proxy fresh baru di latar belakang (auto-refill).
+- **Smart Auto-Scraper & Latency Sorting**: Mengunduh kandidat proxy publik dari 11 sumber aktif, mengujinya secara paralel (60 threads), dan mengurutkannya dari **latensi milidetik tercepat**. Proxy paling kencang otomatis digunakan lebih dulu.
+- **Thread-Safe Storage & Logging**: Penulisan ke `result.txt` dan `keys.txt` diproteksi `threading.Lock()` dengan log terminal berlabel jelas per worker (`[W-1]`, `[W-2]`, dst.).
+- **Fail-Fast & Balanced Timeout (22s)**: Batas waktu `page.goto` disetel 22 detik dan batas tunggu respon disetel 27 detik, cukup toleran terhadap *jitter* proxy tanpa membuang waktu tunggu lama saat proxy macet.
+- **Pacing Turnstile Manusiawi**: Jeda pengetikan manusiawi dan delay pra-submit 3.5 detik untuk memastikan token Cloudflare Turnstile selesai digenerate sebelum form dikirim (mencegah penolakan *"doing that a bit fast"*).
 - **Anti-Hydration Wipe**: Memverifikasi nilai `input_value()` form secara berkala agar kredensial tidak terhapus saat JavaScript React/Next.js me-render ulang halaman.
-- **Pemisahan Ketergantungan (Decoupled Buffering)**: Pembuatan akun dan API key tetap berjalan non-stop meskipun layanan 9Router di VPS sedang offline (Cloudflare Tunnel down). Semua hasil di-buffer ke `result.txt` dan `keys.txt`.
+- **Dukungan VPS / Docker 24/7 (Non-Interaktif)**: Dapat dijalankan tanpa prompt terminal menggunakan flag CLI:
+  ```bash
+  # Mode 1, 100 akun, pakai proxy, 3 worker simultan
+  python main.py --auto 1 100 y --worker 3
+
+  # Mode 2, UNLIMITED akun (jalan terus 24/7), 2 worker
+  python main.py --auto 2 0 y --worker 2 --loop
+  ```
 
 ## Perilaku saat kena limit
 
-- **Too many sign-ups (mode 1 & 2):** kalau masih ada proxy, pindah ke proxy berikutnya.
-  Kalau proxy habis, bot otomatis mengambil 20 proxy fresh baru dari internet.
-- **Cloudflare sibuk ("couldn't create account"):** langsung rotasi instan ke proxy berikutnya.
-- **Proxy mati / timeout:** langsung beralih ke proxy berikutnya dalam 45 detik (disertai heartbeat log).
+- **Too many sign-ups (mode 1 & 2):** buang proxy tersebut, worker mengambil proxy berikutnya dari queue.
+  Jika antrean proxy menipis, bot otomatis me-refill proxy fresh baru dari internet.
+- **Cloudflare sibuk / fast ("doing that a bit fast"):** toleransi jeda 18 detik (maks 2x retry) sebelum rotasi ke proxy berikutnya.
+- **Proxy mati / timeout:** langsung beralih ke proxy berikutnya dalam 22 detik.
 - **Too many attempts saat login (mode 3):** tunggu 30 detik, lalu coba lagi di akun yang sama.
-- **Error jaringan / batas retry tercapai:** akun dilewati (tidak disimpan jika belum jadi), batch lanjut ke akun berikutnya.
+- **Error jaringan / batas retry tercapai:** akun dilewati (tidak disimpan jika belum jadi), worker lanjut ke akun berikutnya.
 
 ## File
 
