@@ -522,12 +522,19 @@ def _buka_link_verifikasi(page, link):
 def buat_api_key(page, email):
     """Buat API key baru dengan label = email. Return key string atau None."""
     log("Membuat API key ...")
-    try:
-        page.goto("https://tokenharbor.ai/dashboard/api-keys",
-                  wait_until="domcontentloaded")
-    except Exception as e:
-        log(f"Gagal buka halaman API keys: {e}", "ERROR")
-        return None
+    sukses_buka = False
+    for coba_goto in range(3):
+        try:
+            time.sleep(1.2)
+            page.goto("https://tokenharbor.ai/dashboard/api-keys",
+                      wait_until="domcontentloaded")
+            sukses_buka = True
+            break
+        except Exception as e:
+            if coba_goto == 2:
+                log(f"Gagal buka halaman API keys: {e}", "ERROR")
+                return None
+            time.sleep(2)
 
     # tutup modal/cooki banner kalau ganggu
     try:
