@@ -844,8 +844,14 @@ def _jalankan_signup(page, email, password):
 
     fast_retry = 0
     terdaftar = False
-    for _ in range(120):
-        txt = _text_of(page)
+    maks_tunggu = 15  # 15 * 3s = 45 detik (cukup untuk respon Token Harbor; jangan biarkan proxy macet tunggu 6 menit)
+    for i in range(1, maks_tunggu + 1):
+        try:
+            txt = _text_of(page)
+        except Exception as e:
+            log(f"Koneksi browser/proxy terputus saat tunggu respon: {e}", "WARN")
+            return "network_error"
+
         notice = detect_notice(txt)
 
         if _di_dashboard(page):
@@ -854,8 +860,9 @@ def _jalankan_signup(page, email, password):
             break
 
         # tombol masih loading ("One moment...") = create account masih diproses
-        # JANGAN masukkan password lagi, tunggu sampai selesai
         if "one moment" in txt.lower():
+            if i % 3 == 0:
+                log(f"Menunggu proses server Token Harbor ({i * 3}s/{maks_tunggu * 3}s)...")
             time.sleep(3)
             continue
 
@@ -884,9 +891,12 @@ def _jalankan_signup(page, email, password):
             _snapshot(page, notice)
             return notice
 
+        if i % 3 == 0:
+            log(f"Menunggu respon pendaftaran ({i * 3}s/{maks_tunggu * 3}s)...")
         time.sleep(3)
 
     if not terdaftar:
+        log("Respon pendaftaran melebihi batas waktu (proxy lambat/macet)", "WARN")
         return "timeout"
 
     # simpan dulu -> kalo verify gagal, akun tetap tersimpan
