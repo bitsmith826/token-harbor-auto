@@ -327,6 +327,14 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None):
                     time.sleep(2)
                     continue
 
+            if status_signup in ("noform", "timeout"):
+                # Turnstile Cloudflare memblokir proxy ini sehingga form pendaftaran tidak muncul
+                if pakai_proxy and proxies:
+                    global_proxy_idx += 1
+                    signup.log(f"Turnstile memblokir proxy ini ({status_signup}) -> beralih ke proxy berikutnya...", "WARN")
+                    time.sleep(2)
+                    continue
+
             if status_signup == "network_minute":
                 signup.log("Server Cloudflare sibuk -> jeda cooldown 90 detik...", "LIMIT")
                 tampilan.tunggu(90, "Jeda keamanan server")

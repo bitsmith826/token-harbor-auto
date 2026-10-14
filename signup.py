@@ -305,7 +305,7 @@ def _page_context_baru(browser, proxy=None):
     return ctx, page
 
 
-def _tunggu_field(page, maks_iter=90, diam=False):
+def _tunggu_field(page, maks_iter=20, diam=False):
     if not diam:
         log("Menunggu field email/password (Turnstile) ...")
     for _ in range(maks_iter):
