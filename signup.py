@@ -932,11 +932,7 @@ def login_dashboard(page, email, password):
         _snapshot(page, "login_nofield")
         return "gagal"
 
-    page.locator('input[type="email"]').fill(email)
-    page.locator('input[type="password"]').fill(password)
-    time.sleep(0.5)
-
-    # tutup cookie banner dulu biar gak nutupin tombol
+    # tutup cookie banner dulu jika ada
     try:
         cc = page.locator("button:has-text('Essential only')")
         if cc.count() > 0:
@@ -944,6 +940,22 @@ def login_dashboard(page, email, password):
             time.sleep(0.5)
     except Exception:
         pass
+
+    # isi email & password dengan verifikasi input_value (mencegah reset oleh React hydration)
+    for _ in range(3):
+        try:
+            page.locator('input[type="email"]').click()
+            time.sleep(0.3)
+            page.locator('input[type="email"]').fill(email)
+            time.sleep(0.5)
+            page.locator('input[type="password"]').click()
+            time.sleep(0.3)
+            page.locator('input[type="password"]').fill(password)
+            time.sleep(0.5)
+            if page.locator('input[type="email"]').input_value() == email:
+                break
+        except Exception:
+            time.sleep(1)
 
     # klik tombol SUBMIT (bukan tab "Sign in" type=button!)
     try:
