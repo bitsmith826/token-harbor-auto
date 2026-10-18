@@ -647,10 +647,22 @@ def buat_api_key(page, email):
 
 
 def _proses_router9(page, email, key, maks_retry=3):
-    """Input API key ke 9Router (sekali). Return True kalau tersimpan."""
+    """Input API key ke 9Router. Prioritaskan REST API langsung (< 1 detik, tanpa buka context browser baru)."""
     import router9
 
-    # context khusus 9Router pakai session tersimpan (supaya tidak login tiap run)
+    # 1. Coba via Direct REST API langsung (Ultra-Fast)
+    try:
+        status_api = router9.api_tambah_api_key(email, key)
+        if status_api in ("tersimpan", "sudah_ada"):
+            log("9Router: API key tersimpan via REST API", "OK")
+            return True
+        if status_api == "invalid":
+            log("9Router: API key ditolak (invalid)", "WARN")
+            return False
+    except Exception as e:
+        log(f"REST API 9Router gagal ({e}), beralih ke fallback browser...", "WARN")
+
+    # 2. Fallback jika REST API bermasalah -> buka browser tab 9Router
     page_router = None
     ctx_router = None
     try:
@@ -666,19 +678,15 @@ def _proses_router9(page, email, key, maks_retry=3):
 
     hasil = False
     for percobaan in range(1, maks_retry + 1):
-        log(f"Input 9Router (percobaan {percobaan}/{maks_retry}) ...")
+        log(f"Input 9Router via browser (percobaan {percobaan}/{maks_retry}) ...")
         try:
             status = router9.proses_router9(page_router, email, key)
         except Exception as e:
             log(f"Error 9Router: {e}", "ERROR")
             return False
 
-        if status == "tersimpan":
+        if status in ("tersimpan", "sudah_ada"):
             log("9Router: API key tersimpan", "OK")
-            hasil = True
-            break
-        if status == "sudah_ada":
-            log("9Router: koneksi sudah ada (skip duplikat)", "OK")
             hasil = True
             break
         log(f"9Router: status {status} -> coba ulang...", "WARN")

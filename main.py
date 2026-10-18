@@ -599,6 +599,76 @@ def mode_import_keys():
 
     signup.log(f"Ditemukan {len(keys)} key di keys.txt")
 
+    # Dedup internal keys.txt sendiri jika ada email kembar di dalam file
+    keys_unik = []
+    dilihat = set()
+    for em, k in keys:
+        if em not in dilihat:
+            dilihat.add(em)
+            keys_unik.append((em, k))
+
+    # Coba via Direct REST API (Ultra-Fast, tanpa perlu membuka browser Camoufox)
+    signup.log("Mencoba membaca daftar koneksi 9Router via REST API (Ultra-Fast)...")
+    sudah_ada = set()
+    pakai_api = False
+    try:
+        if router9.api_login():
+            sudah_ada = router9.api_daftar_koneksi()
+            signup.log(f"REST API: Ditemukan {len(sudah_ada)} koneksi Token Harbor aktif di 9Router", "OK")
+            pakai_api = True
+    except Exception as e:
+        signup.log(f"REST API 9Router gagal diakses ({e}), fallback ke Camoufox...", "WARN")
+
+    if pakai_api:
+        belum_ada = []
+        skip_duplikat = 0
+        for em, k in keys_unik:
+            if em in sudah_ada:
+                skip_duplikat += 1
+            else:
+                belum_ada.append((em, k))
+
+        if skip_duplikat > 0:
+            signup.log(f"{skip_duplikat} key sudah terdaftar di 9Router -> dilewati (anti duplikat)", "OK")
+
+        if not belum_ada:
+            signup.log("Semua key sudah tersimpan di 9Router! Tidak ada key baru yang perlu diinput.", "OK")
+            tampilan.ringkasan({
+                "Mode": "IMPORT_KEYS (REST API)",
+                "Total Key": len(keys),
+                "Key Unik": len(keys_unik),
+                "Sudah Terdaftar": skip_duplikat,
+                "Baru Diinput": 0,
+                "Status Akhir": "OK"
+            }, "HASIL BATCH IMPORT KEYS")
+            return 0
+
+        signup.log(f"Mulai input {len(belum_ada)} key baru via REST API 9Router...", "STEP")
+        sukses = 0
+        gagal = 0
+        for pos, (email, key) in enumerate(belum_ada, 1):
+            tampilan.bagian(f"KEY {pos}/{len(belum_ada)}  -  {email}")
+            tampilan.rinci("key", f"{key[:14]}...  ({len(key)} char)")
+            status = router9.api_tambah_api_key(email, key)
+            if status in ("tersimpan", "sudah_ada"):
+                sukses += 1
+                sudah_ada.add(email)
+            else:
+                gagal += 1
+                signup.log(f"Gagal input {email}: {status}", "ERROR")
+
+        tampilan.ringkasan({
+            "Mode": "IMPORT_KEYS (REST API)",
+            "Total Key": len(keys),
+            "Key Unik": len(keys_unik),
+            "Sudah Terdaftar": skip_duplikat,
+            "Sukses Baru": sukses,
+            "Gagal Baru": gagal,
+            "Status Akhir": "OK" if gagal == 0 else ("SEBAGIAN" if sukses > 0 else "GAGAL")
+        }, "HASIL BATCH IMPORT KEYS")
+        tampilan.log("Semua proses selesai via REST API. Key tersimpan di 9Router", "OK")
+        return 0 if gagal == 0 else 1
+
     Camoufox = _ambil_camoufox()
     with Camoufox(headless=signup.HEADLESS_BROWSER, humanize=True,
                   os=signup.OS_FP,

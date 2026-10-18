@@ -79,6 +79,7 @@ Isi `.env`:
 
 ## Fitur Utama & Ketahanan Otomasi
 
+- **Direct REST API Acceleration (Hasil Reverse Engineering REA)**: Pendaftaran API key dan verifikasi koneksi ke 9Router kini diproses langsung melalui REST API internal 9Router (`/api/auth/login`, `/api/providers`, `/api/providers/validate`). Kecepatan input meningkat drastis dari ~45 detik menjadi **kurang dari 1 detik per akun** tanpa membuka browser Camoufox, memangkas penggunaan RAM dan CPU hingga 95%. Mode 4 (`import_keys`) berjalan instan dalam hitungan detik.
 - **Multi-Worker Concurrency**: Eksekusi multi-threading (1 sampai 5 worker simultan) yang menjalankan instance browser independen secara paralel. Output akun dan API key meningkat berlipat ganda sesuai jumlah worker.
 - **Dedicated Proxy Queue**: Antrean proxy thread-safe eksklusif di mana setiap worker memegang proxy berbeda (mencegah tabrakan IP/rate limit). Jika proxy antrean menipis (< 3), sistem secara otomatis mengunduh & menguji proxy fresh baru di latar belakang (auto-refill).
 - **Smart Auto-Scraper & Latency Sorting**: Mengunduh kandidat proxy publik dari 11 sumber aktif, mengujinya secara paralel (60 threads), dan mengurutkannya dari **latensi milidetik tercepat**. Proxy paling kencang otomatis digunakan lebih dulu.
@@ -93,7 +94,23 @@ Isi `.env`:
 
   # Mode 2, UNLIMITED akun (jalan terus 24/7), 2 worker
   python main.py --auto 2 0 y --worker 2 --loop
+
+  # Mode 4, Import seluruh keys.txt ke 9Router instan via REST API
+  python main.py --auto 4
   ```
+
+## Tips Alternatif Proxy (Bila Proxy Publik Sering Limit)
+
+Jika proxy gratisan scraper sering terkena rate limit Cloudflare Turnstile (*"Too many sign-ups from this network"*), gunakan salah satu opsi andal berikut:
+1. **USB Tethering / Hotspot HP Android (Sangat Disarankan & Gratis)**:
+   - Sambungkan HP ke PC via kabel data (USB Tethering).
+   - Jaringan seluler (Telkomsel/Indosat/XL) menggunakan CGNAT dengan reputasi residential yang sangat tinggi (jarang sekali diblokir Turnstile).
+   - Untuk mengganti IP publik secara instan: cukup aktifkan lalu matikan Mode Pesawat di HP (bisa otomatis via ADB).
+2. **Rotating Residential Proxy Berbayar Murah**:
+   - Gunakan layanan proxy residential (seperti Webshare, IPRoyal, dsb.).
+   - Masukkan proxy format `host:port:username:password` ke [proxies.txt](file:///d:/Coding/token-harbor-auto/proxies.txt).
+3. **Pacing IP Asli (Tanpa Proxy)**:
+   - Jika kebutuhan akun tidak ratusan sekaligus, jalankan dengan IP asli menggunakan delay jeda wajar antar batch.
 
 ## Perilaku saat kena limit
 

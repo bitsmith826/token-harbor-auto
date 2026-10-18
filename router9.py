@@ -13,6 +13,9 @@
 
 import os
 import time
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 import tampilan
@@ -25,6 +28,7 @@ PROVIDER_PREFIX = "th-live"
 # ID provider 9Router untuk navigasi langsung. Di-update otomatis oleh
 # _cari_slug() setiap kali halaman providers dibuka.
 PROVIDER_SLUG = None
+TOKEN_HARBOR_NODE_ID = "openai-compatible-chat-fb7d9be1-3b39-4ed3-b907-c79899d30e4b"
 PROVIDER_BASE_URL = "https://tokenharbor.ai/v1"
 DEFAULT_MODEL = "default"
 
@@ -56,6 +60,216 @@ def _router_password():
 
 def _log(msg, badge="INFO"):
     tampilan.log(msg, badge)
+
+
+# -------------------------------------------------------- Direct REST API
+def api_get_cookies():
+    """Baca cookies (auth_token) dari SESSION_FILE untuk panggilan REST API."""
+    if not SESSION_FILE.exists():
+        return None
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            cookies = [f"{c['name']}={c['value']}" for c in data.get("cookies", []) if "name" in c and "value" in c]
+            if cookies:
+                return "; ".join(cookies)
+    except Exception:
+        pass
+    return None
+
+
+def api_login(force=False):
+    """Login langsung via REST API 9Router (POST /api/auth/login) tanpa browser."""
+    url = _router_url()
+    pw = _router_password()
+    if not pw:
+        _log("ROUTER_PASSWORD belum diisi di .env", "ERROR")
+        return False
+
+    if not force:
+        curr_cookies = api_get_cookies()
+        if curr_cookies:
+            try:
+                req = urllib.request.Request(
+                    f"{url}/api/auth/status",
+                    headers={"Cookie": curr_cookies, "User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    st = json.loads(resp.read().decode("utf-8"))
+                    if st.get("authenticated"):
+                        return True
+            except Exception:
+                pass
+
+    _log("Melakukan login cepat via REST API 9Router...", "STEP")
+    try:
+        req = urllib.request.Request(
+            f"{url}/api/auth/login",
+            data=json.dumps({"password": pw}).encode("utf-8"),
+            headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                raw_cookies = resp.headers.get_all("Set-Cookie") if hasattr(resp.headers, "get_all") else [resp.headers.get("Set-Cookie")]
+                parsed_cookies = []
+                domain = url.replace("https://", "").replace("http://", "").split(":")[0]
+                for c in raw_cookies:
+                    if not c:
+                        continue
+                    parts = c.split(";", 1)[0].split("=", 1)
+                    if len(parts) == 2:
+                        parsed_cookies.append({
+                            "name": parts[0].strip(),
+                            "value": parts[1].strip(),
+                            "domain": domain,
+                            "path": "/",
+                            "secure": url.startswith("https")
+                        })
+                if parsed_cookies:
+                    session_data = {"cookies": parsed_cookies, "origins": []}
+                    with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                        json.dump(session_data, f)
+                    _log("Login REST API 9Router sukses & session tersimpan", "OK")
+                    return True
+    except Exception as e:
+        _log(f"Login REST API 9Router gagal: {e}", "WARN")
+    return False
+
+
+def api_get_node_id():
+    """Ambil ID provider node Token Harbor via /api/provider-nodes."""
+    global TOKEN_HARBOR_NODE_ID
+    cookies = api_get_cookies()
+    if not cookies:
+        if not api_login():
+            return TOKEN_HARBOR_NODE_ID
+        cookies = api_get_cookies()
+    try:
+        req = urllib.request.Request(
+            f"{_router_url()}/api/provider-nodes",
+            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            for node in data.get("nodes", []):
+                if node.get("name") == PROVIDER_NAME or node.get("prefix") == PROVIDER_PREFIX:
+                    TOKEN_HARBOR_NODE_ID = node.get("id")
+                    return TOKEN_HARBOR_NODE_ID
+    except Exception:
+        pass
+    return TOKEN_HARBOR_NODE_ID
+
+
+def api_daftar_koneksi():
+    """Baca daftar nama koneksi (email) Token Harbor via GET /api/providers (kecepatan < 1s)."""
+    cookies = api_get_cookies()
+    if not cookies:
+        if not api_login():
+            return set()
+        cookies = api_get_cookies()
+    try:
+        req = urllib.request.Request(
+            f"{_router_url()}/api/providers",
+            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            conns = data.get("connections", [])
+            emails = set()
+            for c in conns:
+                nname = (c.get("providerSpecificData") or {}).get("nodeName")
+                if nname == PROVIDER_NAME or c.get("provider") == TOKEN_HARBOR_NODE_ID:
+                    name = c.get("name")
+                    if name and "@" in name:
+                        emails.add(name.strip())
+            return emails
+    except Exception as e:
+        _log(f"Gagal baca koneksi via REST API: {e}", "WARN")
+        return set()
+
+
+def api_validasi_key(api_key, node_id=None):
+    """Validasi API key via POST /api/providers/validate. Return (valid: bool, error: str|None)."""
+    node_id = node_id or api_get_node_id()
+    cookies = api_get_cookies()
+    if not cookies:
+        if not api_login():
+            return False, "Login failed"
+        cookies = api_get_cookies()
+
+    payload = {"provider": node_id, "apiKey": api_key}
+    try:
+        req = urllib.request.Request(
+            f"{_router_url()}/api/providers/validate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return bool(data.get("valid")), data.get("error")
+    except Exception as e:
+        return False, str(e)
+
+
+def api_tambah_api_key(email, api_key, node_id=None, cek_valid=True):
+    """Tambah API key ke 9Router langsung via REST API (kecepatan < 1s).
+    Return: 'tersimpan' | 'sudah_ada' | 'invalid' | 'error'
+    """
+    node_id = node_id or api_get_node_id()
+    cookies = api_get_cookies()
+    if not cookies:
+        if not api_login():
+            return "error"
+        cookies = api_get_cookies()
+
+    # 1. Cek duplikat
+    try:
+        sudah = api_daftar_koneksi()
+        if email in sudah:
+            _log(f"Koneksi {email} sudah terdaftar di 9Router (API check) -> skip", "OK")
+            return "sudah_ada"
+    except Exception:
+        pass
+
+    # 2. Validasi key jika diminta
+    if cek_valid:
+        _log(f"Validasi API key via REST API 9Router...", "STEP")
+        valid, err = api_validasi_key(api_key, node_id)
+        if not valid:
+            _log(f"Validasi API key GAGAL via API: {err}", "WARN")
+            return "invalid"
+        _log(f"API key {email} VALID di 9Router", "OK")
+
+    # 3. Simpan key via POST /api/providers
+    payload = {
+        "provider": node_id,
+        "name": email,
+        "apiKey": api_key,
+        "priority": 1,
+        "defaultModel": DEFAULT_MODEL
+    }
+    try:
+        req = urllib.request.Request(
+            f"{_router_url()}/api/providers",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status in (200, 201):
+                _log(f"API key tersimpan via REST API: {email}", "OK")
+                return "tersimpan"
+    except urllib.error.HTTPError as e:
+        # Jika 401 Unauthorized, coba login ulang sekali
+        if e.code == 401 and api_login(force=True):
+            return api_tambah_api_key(email, api_key, node_id=node_id, cek_valid=False)
+        _log(f"HTTP Error tambah key via API: {e.code}", "WARN")
+    except Exception as e:
+        _log(f"Error tambah key via API: {e}", "WARN")
+
+    return "error"
 
 
 # ------------------------------------------------------------------ login
@@ -536,11 +750,24 @@ def tambah_api_key(page, email, api_key):
 def proses_router9(page, email, api_key):
     """
     Dipanggil untuk input API key ke 9Router.
-    Memakai page yang ada. Cek session login secara andal tanpa reload berlebihan.
-    Return: 'tersimpan' | 'invalid' | 'error'
+    Memprioritaskan Direct REST API (kecepatan < 1 detik, tanpa beban browser).
+    Jika REST API gagal dan objek page Playwright tersedia, otomatis fallback ke browser UI.
+    Return: 'tersimpan' | 'sudah_ada' | 'invalid' | 'error'
     """
     _log("Input ke 9Router: " + email, "INFO")
 
+    # 1. Coba lewat REST API langsung terlebih dahulu
+    try:
+        status_api = api_tambah_api_key(email, api_key)
+        if status_api in ("tersimpan", "sudah_ada", "invalid"):
+            return status_api
+    except Exception as e:
+        _log(f"REST API 9Router error ({e}), mencoba fallback browser UI...", "WARN")
+
+    if page is None:
+        return "error"
+
+    _log("Melakukan fallback ke browser UI 9Router...", "STEP")
     # Jika belum di dashboard providers, buka sekali saja
     if "/dashboard/providers" not in (page.url or ""):
         try:
