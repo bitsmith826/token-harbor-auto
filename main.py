@@ -468,6 +468,12 @@ def mode_signup_full(mode, pakai_proxy, jumlah_override=None, worker_override=No
             signup.log("Dihentikan oleh pengguna (Ctrl+C). Menghentikan proses...", "WARN")
             os._exit(0)
 
+    if mode == "full" and total_sukses > 0:
+        try:
+            router9.api_aktifkan_koneksi_unknown()
+        except Exception:
+            pass
+
     tampilan.ringkasan({
         "Mode": mode.upper(),
         "Worker": worker_count,

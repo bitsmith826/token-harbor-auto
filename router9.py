@@ -809,7 +809,13 @@ def tambah_api_key(page, email, api_key):
     if not _save_key(page):
         return "error"
 
-    _log(f"API key tersimpan ke 9Router: {email}", "OK")
+    # Pastikan status langsung aktif (tidak menggantung di 'unknown')
+    try:
+        api_aktifkan_koneksi_unknown()
+    except Exception:
+        pass
+
+    _log(f"API key tersimpan & aktif di 9Router: {email}", "OK")
     return "tersimpan"
 
 
