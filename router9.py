@@ -129,7 +129,7 @@ def api_login(force=False):
                 if parsed_cookies:
                     session_data = {"cookies": parsed_cookies, "origins": []}
                     with open(SESSION_FILE, "w", encoding="utf-8") as f:
-                        json.dump(session_data, f)
+                        json.dump(session_data, f, indent=2)
                     _log("Login REST API 9Router sukses & session tersimpan", "OK")
                     return True
     except Exception as e:
@@ -137,80 +137,106 @@ def api_login(force=False):
     return False
 
 
+def _api_request(endpoint, method="GET", json_data=None, timeout=15, auto_auth=True):
+    """Wrapper sentral REST API 9Router.
+    Menangani otentikasi otomatis, header JSON, dan self-healing saat session expired (HTTP 401).
+    Return: (status_code: int, data: dict|list|None, error_msg: str|None)
+    """
+    url = f"{_router_url()}{endpoint}"
+    cookies = api_get_cookies()
+
+    if not cookies and auto_auth:
+        if not api_login(force=True):
+            return 401, None, "Login 9Router gagal"
+        cookies = api_get_cookies()
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if cookies:
+        headers["Cookie"] = cookies
+
+    body_bytes = None
+    if json_data is not None:
+        headers["Content-Type"] = "application/json"
+        body_bytes = json.dumps(json_data).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            raw_text = resp.read().decode("utf-8", errors="replace")
+            parsed_data = None
+            if raw_text:
+                try:
+                    parsed_data = json.loads(raw_text)
+                except Exception:
+                    parsed_data = raw_text
+            return status, parsed_data, None
+    except urllib.error.HTTPError as e:
+        # Jika session expired (HTTP 401) dan auto_auth aktif, refresh token lalu retry sekali
+        if e.code == 401 and auto_auth:
+            _log("Session REST API 9Router expired (HTTP 401). Memperbarui session token...", "STEP")
+            if api_login(force=True):
+                return _api_request(endpoint, method=method, json_data=json_data, timeout=timeout, auto_auth=False)
+            return 401, None, "HTTP Error 401: Unauthorized (gagal login ulang)"
+
+        # Baca pesan error dari body bila ada
+        err_body = ""
+        parsed_err = None
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+            parsed_err = json.loads(err_body)
+        except Exception:
+            pass
+        return e.code, parsed_err, f"HTTP Error {e.code}: {e.reason}"
+    except Exception as e:
+        return 0, None, str(e)
+
+
 def api_get_node_id():
     """Ambil ID provider node Token Harbor via /api/provider-nodes."""
     global TOKEN_HARBOR_NODE_ID
-    cookies = api_get_cookies()
-    if not cookies:
-        if not api_login():
-            return TOKEN_HARBOR_NODE_ID
-        cookies = api_get_cookies()
-    try:
-        req = urllib.request.Request(
-            f"{_router_url()}/api/provider-nodes",
-            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0"}
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            for node in data.get("nodes", []):
-                if node.get("name") == PROVIDER_NAME or node.get("prefix") == PROVIDER_PREFIX:
-                    TOKEN_HARBOR_NODE_ID = node.get("id")
-                    return TOKEN_HARBOR_NODE_ID
-    except Exception:
-        pass
+    status, data, _ = _api_request("/api/provider-nodes", timeout=10)
+    if status == 200 and isinstance(data, dict):
+        for node in data.get("nodes", []):
+            if node.get("name") == PROVIDER_NAME or node.get("prefix") == PROVIDER_PREFIX:
+                TOKEN_HARBOR_NODE_ID = node.get("id")
+                return TOKEN_HARBOR_NODE_ID
     return TOKEN_HARBOR_NODE_ID
 
 
 def api_daftar_koneksi():
     """Baca daftar nama koneksi (email) Token Harbor via GET /api/providers (kecepatan < 1s)."""
-    cookies = api_get_cookies()
-    if not cookies:
-        if not api_login():
-            return set()
-        cookies = api_get_cookies()
-    try:
-        req = urllib.request.Request(
-            f"{_router_url()}/api/providers",
-            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0"}
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            conns = data.get("connections", [])
-            emails = set()
-            for c in conns:
-                nname = (c.get("providerSpecificData") or {}).get("nodeName")
-                if nname == PROVIDER_NAME or c.get("provider") == TOKEN_HARBOR_NODE_ID:
-                    name = c.get("name")
-                    if name and "@" in name:
-                        emails.add(name.strip())
-            return emails
-    except Exception as e:
-        _log(f"Gagal baca koneksi via REST API: {e}", "WARN")
-        return set()
+    status, data, err = _api_request("/api/providers", timeout=10)
+    if status == 200 and isinstance(data, dict):
+        conns = data.get("connections", [])
+        emails = set()
+        for c in conns:
+            nname = (c.get("providerSpecificData") or {}).get("nodeName")
+            if nname == PROVIDER_NAME or c.get("provider") == TOKEN_HARBOR_NODE_ID:
+                name = c.get("name")
+                if name and "@" in name:
+                    emails.add(name.strip())
+        return emails
+    if err:
+        _log(f"Gagal baca koneksi via REST API: {err}", "WARN")
+    return set()
 
 
 def api_validasi_key(api_key, node_id=None):
-    """Validasi API key via POST /api/providers/validate. Return (valid: bool, error: str|None)."""
+    """Validasi API key via POST /api/providers/validate.
+    Return:
+      (True, None)          -> Key VALID di 9Router
+      (False, error_pesan)  -> Key DITOLAK oleh 9Router (valid: false)
+      (None, error_pesan)   -> Gagal menghubungi server (network/server error)
+    """
     node_id = node_id or api_get_node_id()
-    cookies = api_get_cookies()
-    if not cookies:
-        if not api_login():
-            return False, "Login failed"
-        cookies = api_get_cookies()
-
     payload = {"provider": node_id, "apiKey": api_key}
-    try:
-        req = urllib.request.Request(
-            f"{_router_url()}/api/providers/validate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return bool(data.get("valid")), data.get("error")
-    except Exception as e:
-        return False, str(e)
+    status, data, err = _api_request("/api/providers/validate", method="POST", json_data=payload, timeout=15)
+    if status == 200 and isinstance(data, dict):
+        if data.get("valid"):
+            return True, None
+        return False, data.get("error") or "API key ditolak oleh 9Router"
+    return None, err or f"HTTP {status}"
 
 
 def api_tambah_api_key(email, api_key, node_id=None, cek_valid=True):
@@ -218,11 +244,6 @@ def api_tambah_api_key(email, api_key, node_id=None, cek_valid=True):
     Return: 'tersimpan' | 'sudah_ada' | 'invalid' | 'error'
     """
     node_id = node_id or api_get_node_id()
-    cookies = api_get_cookies()
-    if not cookies:
-        if not api_login():
-            return "error"
-        cookies = api_get_cookies()
 
     # 1. Cek duplikat
     try:
@@ -235,12 +256,21 @@ def api_tambah_api_key(email, api_key, node_id=None, cek_valid=True):
 
     # 2. Validasi key jika diminta
     if cek_valid:
-        _log(f"Validasi API key via REST API 9Router...", "STEP")
-        valid, err = api_validasi_key(api_key, node_id)
-        if not valid:
-            _log(f"Validasi API key GAGAL via API: {err}", "WARN")
-            return "invalid"
-        _log(f"API key {email} VALID di 9Router", "OK")
+        _log("Validasi API key via REST API 9Router...", "STEP")
+        is_valid, err = api_validasi_key(api_key, node_id)
+        if is_valid is False:
+            # Beri jeda 2 detik dan coba sekali lagi untuk toleransi propagasi tokenharbor
+            time.sleep(2)
+            is_valid_retry, err2 = api_validasi_key(api_key, node_id)
+            if is_valid_retry:
+                _log(f"API key {email} VALID pada percobaan ulang", "OK")
+            else:
+                _log(f"Validasi API key GAGAL via API: {err}", "WARN")
+                return "invalid"
+        elif is_valid is None:
+            _log(f"Validasi API key tidak dapat dipastikan ({err}), lanjut mencoba simpan...", "WARN")
+        else:
+            _log(f"API key {email} VALID di 9Router", "OK")
 
     # 3. Simpan key via POST /api/providers
     payload = {
@@ -250,25 +280,12 @@ def api_tambah_api_key(email, api_key, node_id=None, cek_valid=True):
         "priority": 1,
         "defaultModel": DEFAULT_MODEL
     }
-    try:
-        req = urllib.request.Request(
-            f"{_router_url()}/api/providers",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Cookie": cookies, "User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status in (200, 201):
-                _log(f"API key tersimpan via REST API: {email}", "OK")
-                return "tersimpan"
-    except urllib.error.HTTPError as e:
-        # Jika 401 Unauthorized, coba login ulang sekali
-        if e.code == 401 and api_login(force=True):
-            return api_tambah_api_key(email, api_key, node_id=node_id, cek_valid=False)
-        _log(f"HTTP Error tambah key via API: {e.code}", "WARN")
-    except Exception as e:
-        _log(f"Error tambah key via API: {e}", "WARN")
+    status, data, err = _api_request("/api/providers", method="POST", json_data=payload, timeout=12)
+    if status in (200, 201):
+        _log(f"API key tersimpan via REST API: {email}", "OK")
+        return "tersimpan"
 
+    _log(f"Gagal simpan key via REST API (status {status}): {err}", "WARN")
     return "error"
 
 

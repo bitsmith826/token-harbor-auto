@@ -656,9 +656,7 @@ def _proses_router9(page, email, key, maks_retry=3):
         if status_api in ("tersimpan", "sudah_ada"):
             log("9Router: API key tersimpan via REST API", "OK")
             return True
-        if status_api == "invalid":
-            log("9Router: API key ditolak (invalid)", "WARN")
-            return False
+        log(f"REST API 9Router mengembalikan status '{status_api}', mencoba fallback via browser...", "WARN")
     except Exception as e:
         log(f"REST API 9Router gagal ({e}), beralih ke fallback browser...", "WARN")
 
