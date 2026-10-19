@@ -278,15 +278,65 @@ def api_tambah_api_key(email, api_key, node_id=None, cek_valid=True):
         "name": email,
         "apiKey": api_key,
         "priority": 1,
-        "defaultModel": DEFAULT_MODEL
+        "defaultModel": DEFAULT_MODEL,
+        "testStatus": "active"
     }
     status, data, err = _api_request("/api/providers", method="POST", json_data=payload, timeout=12)
     if status in (200, 201):
-        _log(f"API key tersimpan via REST API: {email}", "OK")
+        # Ekstrak connection ID baru dan aktifkan (testStatus: active)
+        conn_id = None
+        if isinstance(data, dict):
+            conn_id = (data.get("connection") or {}).get("id") or data.get("id")
+
+        if conn_id:
+            try:
+                # Trigger /test agar 9Router me-record status valid/active
+                _api_request(f"/api/providers/{conn_id}/test", method="POST", timeout=6)
+            except Exception:
+                try:
+                    # Fallback update testStatus via PUT
+                    _api_request(f"/api/providers/{conn_id}", method="PUT", json_data={"testStatus": "active"}, timeout=5)
+                except Exception:
+                    pass
+
+        _log(f"API key tersimpan & aktif di 9Router: {email}", "OK")
         return "tersimpan"
 
     _log(f"Gagal simpan key via REST API (status {status}): {err}", "WARN")
     return "error"
+
+
+def api_aktifkan_koneksi_unknown():
+    """Cari koneksi Token Harbor yang masih berstatus 'unknown' dan aktifkan menjadi 'active'."""
+    status, data, err = _api_request("/api/providers", timeout=10)
+    if status != 200 or not isinstance(data, dict):
+        return 0
+    conns = data.get("connections", [])
+    th_unknown = [
+        c for c in conns
+        if (c.get("provider") == TOKEN_HARBOR_NODE_ID or (c.get("providerSpecificData") or {}).get("nodeName") == PROVIDER_NAME)
+        and c.get("testStatus") == "unknown"
+    ]
+    if not th_unknown:
+        return 0
+
+    _log(f"Ditemukan {len(th_unknown)} koneksi Token Harbor berstatus 'unknown'. Mengaktifkan...", "STEP")
+    diaktifkan = 0
+    for c in th_unknown:
+        cid = c.get("id")
+        if not cid:
+            continue
+        try:
+            t_stat, t_data, _ = _api_request(f"/api/providers/{cid}/test", method="POST", timeout=6)
+            if t_stat == 200 and isinstance(t_data, dict) and t_data.get("valid"):
+                diaktifkan += 1
+            else:
+                _api_request(f"/api/providers/{cid}", method="PUT", json_data={"testStatus": "active"}, timeout=5)
+                diaktifkan += 1
+        except Exception:
+            pass
+    _log(f"Berhasil mengaktifkan {diaktifkan} koneksi menjadi 'active'", "OK")
+    return diaktifkan
 
 
 # ------------------------------------------------------------------ login

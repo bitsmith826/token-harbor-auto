@@ -633,6 +633,7 @@ def mode_import_keys():
 
         if not belum_ada:
             signup.log("Semua key sudah tersimpan di 9Router! Tidak ada key baru yang perlu diinput.", "OK")
+            router9.api_aktifkan_koneksi_unknown()
             tampilan.ringkasan({
                 "Mode": "IMPORT_KEYS (REST API)",
                 "Total Key": len(keys),
@@ -656,6 +657,9 @@ def mode_import_keys():
             else:
                 gagal += 1
                 signup.log(f"Gagal input {email}: {status}", "ERROR")
+
+        if sukses > 0:
+            router9.api_aktifkan_koneksi_unknown()
 
         tampilan.ringkasan({
             "Mode": "IMPORT_KEYS (REST API)",
